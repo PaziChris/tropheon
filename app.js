@@ -117,7 +117,7 @@ async function initFirebase(){
     try {
       const ac = await import(FB + 'firebase-app-check.js');
       if (['localhost','127.0.0.1'].includes(location.hostname)) self.FIREBASE_APPCHECK_DEBUG_TOKEN = true;
-      ac.initializeAppCheck(app, {provider:new ac.ReCaptchaV3Provider(CONFIG.recaptchaSiteKey), isTokenAutoRefreshEnabled:true});
+      ac.initializeAppCheck(app, {provider:new ac.ReCaptchaEnterpriseProvider(CONFIG.recaptchaSiteKey), isTokenAutoRefreshEnabled:true});
     } catch(e) { console.warn('App Check', e); }
   }
   const auth = authM.getAuth(app);

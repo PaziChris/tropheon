@@ -17,7 +17,7 @@ export default {
     measurementId: "G-8W34RGER3H"
   },
 
-  // App Check (Pflicht für die KI): reCAPTCHA-v3-Websiteschlüssel.
+  // App Check (Pflicht für die KI): Schlüssel aus Google Cloud Fraud Defense (reCAPTCHA Enterprise, Typ Web).
   // Anleitung im README, Schritt 6.
   recaptchaSiteKey: "",
 

@@ -43,13 +43,12 @@ Reines HTML/CSS/JavaScript, kein Build-Schritt.
 3. Modell: in `firebase-config.js` steht `gemini-3.5-flash` (stabil, im Gratis-Kontingent). Du kannst es dort ändern.
 
 ### 6. App Check einrichten (Pflicht für die KI)
-Schützt dein KI-Kontingent davor, dass fremde Seiten es benutzen.
-1. Öffne <https://www.google.com/recaptcha/admin/create>, Typ **reCAPTCHA v3**.
-2. Domains: `DEINE-PROJEKT-ID.web.app`, `DEINE-PROJEKT-ID.firebaseapp.com` und `localhost`.
-3. Du bekommst einen **Websiteschlüssel** und einen **geheimen Schlüssel**.
-4. Firebase-Konsole: **Security → App Check → Apps → deine Web-App → reCAPTCHA** → geheimen Schlüssel eintragen, speichern.
-5. Den **Websiteschlüssel** in `firebase-config.js` bei `recaptchaSiteKey` eintragen.
-6. Unter **App Check → APIs** muss „Firebase AI Logic“ auf **Erzwungen** stehen.
+Schützt dein KI-Kontingent davor, dass fremde Seiten es benutzen. reCAPTCHA Classic wird nicht mehr unterstützt, deshalb wird **Fraud Defense** (früher reCAPTCHA Enterprise) verwendet.
+1. Öffne <https://console.cloud.google.com/security/recaptcha> und wähle oben dein Projekt.
+2. Falls gefragt: API aktivieren. Dann **Schlüssel erstellen**: Plattform **Web**, Domains `DEINE-PROJEKT-ID.web.app` und `DEINE-PROJEKT-ID.firebaseapp.com`, „Kästchen-Challenge verwenden“ **aus**.
+3. Firebase-Konsole: **Security → App Check → Apps → deine Web-App → Fraud Defense** → Schlüssel-ID eintragen, speichern.
+4. Dieselbe Schlüssel-ID in `firebase-config.js` bei `recaptchaSiteKey` eintragen.
+5. Unter **App Check → APIs** „Firebase AI Logic“ auf **Erzwingen** stellen.
 
 ### 7. Online stellen
 
@@ -82,7 +81,7 @@ Seite im Handy-Browser öffnen →
 ```bash
 npx serve .        # oder: python3 -m http.server 8080
 ```
-Dann <http://localhost:8080>. Für die KI lokal: In der Browser-Konsole erscheint ein App-Check-Debug-Token. Trage ihn unter **App Check → Apps → ⋮ → Debug-Tokens verwalten** ein.
+Dann <http://localhost:8080>. Für die KI lokal: Lege einen eigenen Fraud-Defense-Schlüssel nur für `localhost` an oder nutze den Debug-Token aus der Browser-Konsole erscheint ein App-Check-Debug-Token. Trage ihn unter **App Check → Apps → ⋮ → Debug-Tokens verwalten** ein.
 
 ## Dateien
 | Datei | Zweck |
