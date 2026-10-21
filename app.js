@@ -323,7 +323,7 @@ function render(){
 }
 function softRender(){ if (S.view === 'profile') { const el = $('#store-chip'); if (el) el.innerHTML = storeText(); return; } render(); }
 function storeText(){ return S.mode === 'cloud' ? 'Cloud ✓<br>' + esc(S.user?.displayName?.split(' ')[0] || '') : 'nur dieses<br>Gerät'; }
-function topHTML(){ return `<div class="top"><div class="brand"><svg viewBox="0 0 120 120" aria-hidden="true"><use href="#amphora"/></svg><span><b>TROPHEON</b><small>Ancient Roots. Modern Nutrition.</small></span></div><span class="store-chip" id="store-chip">${storeText()}</span></div><div class="meander" aria-hidden="true"></div>`; }
+function topHTML(){ return `<div class="top"><div class="brand"><svg viewBox="0 0 200 200" aria-hidden="true"><use href="#olympian"/></svg><span><b>TROPHEON</b><small>Ancient Roots. Modern Nutrition.</small></span></div><span class="store-chip" id="store-chip">${storeText()}</span></div><div class="meander" aria-hidden="true"></div>`; }
 
 function wreathRing(pct, over){
   const C0 = 80, R = 54, C = 2*Math.PI*R, p = Math.max(0, Math.min(1, pct));
@@ -341,9 +341,35 @@ function column(lbl, val, tgt, cls){
 }
 const pmHTML = t => `<span class="pm"><i class="P">P ${fmt(t.protein)}</i><i class="K">KH ${fmt(t.carbs)}</i><i class="F">F ${fmt(t.fat)}</i></span>`;
 
+/* Orakel: ein Olympier kommentiert den Tag */
+const GODS = {
+  zeus:{n:'Zeus', g:'ΖΕΥΣ', r:'Herrscher des Olymp'}, demeter:{n:'Demeter', g:'ΔΗΜΗΤΗΡ', r:'Göttin der Ernte'},
+  herakles:{n:'Herakles', g:'ΗΡΑΚΛΗΣ', r:'Held der Stärke'}, nike:{n:'Nike', g:'ΝΙΚΗ', r:'Göttin des Sieges'},
+  dionysos:{n:'Dionysos', g:'ΔΙΟΝΥΣΟΣ', r:'Gott des Festes'}, athena:{n:'Athena', g:'ΑΘΗΝΑ', r:'Göttin der Weisheit'},
+};
+function oracle(k, entries, tot, c, R){
+  const today = k === todayKey(), h = new Date().getHours(), gain = S.profile?.goal === 'gain';
+  if (!c) return {god:'athena', t:'Erkenne dich selbst', x:'Γνῶθι σεαυτόν – stand am Tempel von Delphi. Leg im Profil Alter, Größe, Gewicht und Ziel fest, dann kenne ich deinen Bedarf.'};
+  const rem = c.target - tot.kcal, p = tot.kcal / c.target, protLeft = R.protein - tot.protein;
+  if (!entries.length) return today
+    ? {god:'demeter', t:'Der Tisch ist gedeckt', x:`Demeter wartet auf deine erste Mahlzeit. Heute stehen dir ${fmt(c.target)} kcal und ${fmt(R.protein)} g Protein zu.`}
+    : {god:'demeter', t:'Kein Eintrag an diesem Tag', x:'Für diesen Tag wurde nichts erfasst. Du kannst Mahlzeiten nachtragen.'};
+  if (!gain && p > 1.1) return {god:'dionysos', t:`${fmt(-rem)} kcal über dem Ziel`, x:today ? 'Dionysos hat heute mitgefeiert. Kein Drama – ein Tag entscheidet nichts. Morgen zählt wieder.' : 'An diesem Tag hat Dionysos mitgefeiert. Ein einzelner Tag entscheidet nichts.'};
+  if (Math.abs(p - 1) <= 0.1 && protLeft <= R.protein * 0.1) return {god:'nike', t:'Sieg!', x:`Kalorienziel und Protein erreicht – Nike bringt dir den Lorbeer. ${gain ? 'So wachsen Muskeln.' : 'So schmilzt das Fett, und die Muskeln bleiben.'}`, win:true};
+  if (gain && today && h >= 18 && rem > 300) return {god:'herakles', t:`Noch ${fmt(rem)} kcal`, x:'Herakles wurde nicht mit leerem Magen stark. Für dein Aufbauziel fehlt heute noch eine richtige Mahlzeit.'};
+  if (protLeft > R.protein * 0.35 && (!today || h >= 14)) return {god:'herakles', t:`Noch ${fmt(protLeft)} g Protein`, x:'Herakles mahnt: Ohne Protein keine Heldenkraft. Gute Quellen: griechischer Joghurt, Eier, Hähnchen, Linsen, Feta.'};
+  if (entries.length >= 2 && tot.fiber < 12 && (!today || h >= 15)) return {god:'athena', t:'Mehr Grünes auf den Teller', x:`Athena rät: erst ${fmt(tot.fiber)} g Ballaststoffe. Gemüse, Hülsenfrüchte oder Oliven sättigen lange.`};
+  if (rem >= 0) return {god:'zeus', t:`Noch ${fmt(rem)} kcal`, x:today ? `Zeus wacht über dein Ziel. ${gain ? 'Iss heute noch, was dir zusteht.' : `Du liegst gut – ${fmt(Math.max(0, protLeft))} g Protein fehlen noch.`}` : 'Unter dem Ziel geblieben.'};
+  return {god:'zeus', t:`${fmt(-rem)} kcal über dem Ziel`, x:gain ? 'Für dein Aufbauziel ist das in Ordnung.' : 'Knapp drüber – Zeus drückt ein Auge zu.'};
+}
+function oracleHTML(o){
+  const g = GODS[o.god];
+  return `<section class="oracle ${o.win ? 'win' : ''}"><div class="coin"><svg viewBox="0 0 200 200" aria-hidden="true"><use href="#olympian"/></svg><span class="glyph"><svg viewBox="0 0 24 24"><use href="#g-${o.god}"/></svg></span></div><div class="oracle-t"><span class="eyebrow">${g.g} · ${g.r}</span><b>${esc(o.t)}</b><p>${esc(o.x)}</p></div></section>`;
+}
 function todayHTML(){
   const k = S.date, t = todayKey(), entries = S.days[k]?.entries || [], tot = sumEntries(entries), c = calc(S.profile), R = refs(S.profile, c);
   let h = `<div class="daynav"><button data-action="prev-day" aria-label="Vorheriger Tag" ${k <= minDate() ? 'disabled' : ''}>‹</button><label class="datepick">${dayLabel(k)}<small>${dateLong(k)}</small><input type="date" id="dpick" value="${k}" min="${minDate()}" max="${t}" aria-label="Tag auswählen"></label><button data-action="next-day" aria-label="Nächster Tag" ${k >= t ? 'disabled' : ''}>›</button></div>`;
+  h += oracleHTML(oracle(k, entries, tot, c, R));
   if (c) {
     const rem = c.target - tot.kcal, over = rem < 0, bal = tot.kcal - c.tdee, gain = S.profile.goal === 'gain';
     const gl = S.profile.goal === 'lose' ? `Abnehmen · ${fmt(c.delta)} kcal/Tag` : gain ? `Zunehmen · ${sgn(c.delta)} kcal/Tag` : 'Gewicht halten';
@@ -351,7 +377,7 @@ function todayHTML(){
       <div class="stats"><div class="stat"><span>Tagesziel</span><b>${fmt(c.target)} kcal</b></div><div class="stat"><span>Gegessen</span><b>${fmt(tot.kcal)} kcal</b></div><div class="stat"><span>Verbrauch</span><b>${fmt(c.tdee)} kcal</b></div><div class="stat"><span>${bal <= 0 ? 'Defizit' : 'Überschuss'}</span><b class="${(gain ? bal >= 0 : bal <= 0) ? 'pos' : 'neg'}">${sgn(bal)} kcal</b></div><span class="goalchip">${gl}</span></div></div>
       <div class="colonnade">${column('Protein', tot.protein, R.protein, 'protein')}${column('Kohlenh.', tot.carbs, R.carbs, 'carbs')}${column('Fett', tot.fat, R.fat, 'fat')}</div></section>`;
   } else {
-    h += `<section class="panel"><span class="eyebrow">Γνῶθι σεαυτόν · Erkenne dich selbst</span><h2 style="margin-top:6px">Erst dein Ziel festlegen</h2><p class="muted" style="margin:6px 0 12px">Mit Alter, Größe, Gewicht und Aktivität berechne ich deinen Kalorienbedarf, dein Defizit zum Abnehmen oder den Überschuss zum Zunehmen.</p><button class="primary" data-action="tab" data-view="profile">Profil einrichten</button>${entries.length ? `<hr class="hair"><div class="stat"><span>Gegessen</span><b>${fmt(tot.kcal)} kcal</b></div>` : ''}</section>`;
+    h += `<section class="panel"><h2>Erst dein Ziel festlegen</h2><p class="muted" style="margin:6px 0 12px">Mit Alter, Größe, Gewicht und Aktivität berechne ich deinen Kalorienbedarf, dein Defizit zum Abnehmen oder den Überschuss zum Zunehmen.</p><button class="primary" data-action="tab" data-view="profile">Profil einrichten</button>${entries.length ? `<hr class="hair"><div class="stat"><span>Gegessen</span><b>${fmt(tot.kcal)} kcal</b></div>` : ''}</section>`;
   }
   if (!entries.length) {
     h += `<div class="empty"><svg viewBox="0 0 120 120" aria-hidden="true"><use href="#amphora"/></svg><b>Die Amphore ist leer</b><span>Fotografiere deinen Teller – ich erkenne die Speisen und schätze Kalorien, Protein und Vitamine. Du kannst alles nachträglich korrigieren.</span><button class="primary" data-action="open-add">Erste Mahlzeit erfassen</button></div>`;

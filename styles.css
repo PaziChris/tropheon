@@ -306,3 +306,25 @@ textarea{resize:vertical}
 .icon-btn.armed{background:var(--bad);color:var(--surface);border-color:var(--bad)}
 .weightlog{flex-wrap:wrap}
 .weightlog .field{min-width:120px}
+
+/* Olympier */
+:root{--coin:#dc7446;--figure:#17110d}
+.brand svg{width:40px;height:40px}
+.emblem{width:170px;height:170px;filter:drop-shadow(0 6px 14px rgba(0,0,0,.25))}
+.oracle{display:grid;grid-template-columns:84px 1fr;gap:14px;align-items:center;padding:14px;border-radius:var(--r);background:var(--figure);color:#f3e6d4;position:relative;overflow:hidden}
+.oracle::after{content:"";position:absolute;left:0;right:0;bottom:0;height:8px;background:var(--coin);opacity:.85;
+  -webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='14'%3E%3Cpath d='M0 13H22V1H6V9H17V5H11' fill='none' stroke='%23000' stroke-width='2'/%3E%3C/svg%3E") left center/16px 8px repeat-x;
+          mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='14'%3E%3Cpath d='M0 13H22V1H6V9H17V5H11' fill='none' stroke='%23000' stroke-width='2'/%3E%3C/svg%3E") left center/16px 8px repeat-x}
+.oracle .coin{position:relative;width:84px;height:84px}
+.oracle .coin>svg{width:84px;height:84px;display:block}
+.oracle .glyph{position:absolute;right:-4px;bottom:-2px;width:32px;height:32px;border-radius:50%;background:#f3e6d4;color:var(--figure);display:grid;place-items:center;border:2px solid var(--gold)}
+.oracle .glyph svg{width:19px;height:19px}
+.oracle-t{min-width:0;padding-bottom:6px}
+.oracle .eyebrow{display:block;font-size:10.5px;letter-spacing:.14em}
+.oracle b{display:block;font-family:var(--f-display);font-weight:900;font-size:20px;letter-spacing:.03em;line-height:1.15;margin:3px 0 4px;text-wrap:balance}
+.oracle p{margin:0;font-size:14.5px;line-height:1.4;color:#d9cbb8}
+.oracle.win{background:linear-gradient(135deg,var(--figure),#3a2a10)}
+.oracle.win .coin>svg{animation:glow 2.4s ease-in-out infinite alternate}
+@keyframes glow{from{filter:drop-shadow(0 0 0 rgba(214,178,92,0))}to{filter:drop-shadow(0 0 10px rgba(214,178,92,.8))}}
+:root[data-theme="dark"] .oracle{border:1px solid var(--line)}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]) .oracle{border:1px solid var(--line)}}
