@@ -134,7 +134,7 @@ async function initFirebase(){
     models = [...new Set(names)].map(n => ({name:n, m:aiM.getGenerativeModel(ai, {model:n, generationConfig:gc})}));
   } catch(e) { console.warn('AI Logic', e); }
   fb = {app, auth, db, authM, fsM, models, model:models[0]?.m || null};
-  S.ai = model ? 'on' : 'off';
+  S.ai = models.length ? 'on' : 'off';
   authM.getRedirectResult(auth).catch(e => showLoginError(e));
   authM.onAuthStateChanged(auth, u => {
     if (u) startCloud(u);
@@ -207,8 +207,25 @@ function startCloud(user){
     }
     lsSet(migrateKey, '1');
     const m = {}; qs.forEach(d => { m[d.id] = d.data(); }); S.days = m; saveCache(); softRender();
-    if (!qs.metadata.fromCache) cleanup();
+    if (!qs.metadata.fromCache) { mergeLocalIntoCloud(); cleanup(); }
   }, e => console.warn(e)));
+}
+// Einträge, die offline bzw. ohne Anmeldung auf dem Gerät gemacht wurden, ins Konto übernehmen (doppelte per ID ausgeschlossen)
+let merged = false;
+function mergeLocalIntoCloud(){
+  if (merged) return; merged = true;
+  let local; try { local = JSON.parse(lsGet(K_LOCAL) || 'null'); } catch(e) { return; }
+  if (!local?.days) return;
+  let n = 0;
+  Object.entries(local.days).forEach(([k, d]) => {
+    if (!d?.entries?.length) return;
+    const day = S.days[k] || (S.days[k] = {date:k, entries:[]}), ids = new Set(day.entries.map(e => e.id));
+    const add = d.entries.filter(e => !ids.has(e.id)); if (!add.length) return;
+    day.entries.push(...add); n += add.length; saveDay(k);
+  });
+  if (!S.profile && local.profile) { S.profile = local.profile; saveProfile(); }
+  lsSet(K_LOCAL, JSON.stringify({profile:local.profile || null, days:{}}));
+  if (n) { softRender(); toast(`${n} Einträge vom Gerät ins Konto übernommen`); }
 }
 function saveDay(k){
   const d = S.days[k];

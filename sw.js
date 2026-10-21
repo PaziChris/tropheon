@@ -1,6 +1,6 @@
 // TROPHEON Service Worker – App-Dateien offline verfügbar halten.
 // Bei jeder Änderung an den App-Dateien VERSION erhöhen.
-const VERSION = 'tropheon-v4';
+const VERSION = 'tropheon-v5';
 const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'firebase-config.js', 'manifest.webmanifest',
   'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png'];
 
