@@ -8,12 +8,13 @@
 // ─────────────────────────────────────────────────────────────
 export default {
   firebase: {
-    apiKey: "DEIN_API_KEY",
-    authDomain: "DEIN-PROJEKT.firebaseapp.com",
-    projectId: "DEIN-PROJEKT",
-    storageBucket: "DEIN-PROJEKT.firebasestorage.app",
-    messagingSenderId: "000000000000",
-    appId: "1:000000000000:web:0000000000000000"
+    apiKey: "AIzaSyDZ9jux9Ud28skbcevt3SrsmjJWYHqzZV8",
+    authDomain: "tropheon-758cb.firebaseapp.com",
+    projectId: "tropheon-758cb",
+    storageBucket: "tropheon-758cb.firebasestorage.app",
+    messagingSenderId: "913162665282",
+    appId: "1:913162665282:web:98ab5a2f2ae48e56729cdb",
+    measurementId: "G-8W34RGER3H"
   },
 
   // App Check (Pflicht für die KI): reCAPTCHA-v3-Websiteschlüssel.
