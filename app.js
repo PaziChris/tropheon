@@ -163,8 +163,26 @@ async function signInGoogle(){
 }
 function stopListeners(){ unsubs.forEach(u => { try { u(); } catch(e) {} }); unsubs = []; }
 
+/* Aufbewahrung: Fotos 7 Tage, Einträge 1 Monat (Gewichtsverlauf bleibt) */
+const KEEP_DAYS = 31, PHOTO_DAYS = 7;
+const minDate = () => addDays(todayKey(), -(KEEP_DAYS - 1));
+function cleanup(){
+  const flag = 'tropheon.cleanup.' + cacheKey, t = todayKey();
+  if (lsGet(flag) === t) return; lsSet(flag, t);
+  const oldest = minDate(), photoCut = addDays(t, -PHOTO_DAYS);
+  let removed = 0, photos = 0;
+  Object.keys(S.days).forEach(k => {
+    const d = S.days[k];
+    if (k < oldest) { d.entries = []; removed++; saveDay(k); return; }
+    if (k < photoCut && d?.entries?.some(e => String(e.thumb || '').startsWith('data:'))) {
+      d.entries.forEach(e => { if (String(e.thumb || '').startsWith('data:')) { e.thumb = null; photos++; } }); saveDay(k);
+    }
+  });
+  Object.values(productCache()).forEach(pr => { if (String(pr.img || '').startsWith('data:') && (pr.used || 0) < Date.now() - PHOTO_DAYS*864e5) { pr.img = null; const c = productCache(); c[pr.code] = pr; lsSet(K_PRODUCTS, JSON.stringify(c)); } });
+  if (removed || photos) { console.info('Aufgeräumt', {removed, photos}); softRender(); }
+}
 function startLocal(){
-  stopListeners(); S.mode = 'local'; S.user = null; cacheKey = K_LOCAL; loadCache(); hideLogin(); render();
+  stopListeners(); S.mode = 'local'; S.user = null; cacheKey = K_LOCAL; loadCache(); cleanup(); hideLogin(); render();
 }
 function startCloud(user){
   stopListeners(); S.mode = 'cloud'; S.user = user; cacheKey = 'tropheon.cache.' + user.uid; loadCache(); hideLogin(); render();
@@ -189,6 +207,7 @@ function startCloud(user){
     }
     lsSet(migrateKey, '1');
     const m = {}; qs.forEach(d => { m[d.id] = d.data(); }); S.days = m; saveCache(); softRender();
+    if (!qs.metadata.fromCache) cleanup();
   }, e => console.warn(e)));
 }
 function saveDay(k){
@@ -307,7 +326,7 @@ const pmHTML = t => `<span class="pm"><i class="P">P ${fmt(t.protein)}</i><i cla
 
 function todayHTML(){
   const k = S.date, t = todayKey(), entries = S.days[k]?.entries || [], tot = sumEntries(entries), c = calc(S.profile), R = refs(S.profile, c);
-  let h = `<div class="daynav"><button data-action="prev-day" aria-label="Vorheriger Tag">‹</button><label class="datepick">${dayLabel(k)}<small>${dateLong(k)}</small><input type="date" id="dpick" value="${k}" max="${t}" aria-label="Tag auswählen"></label><button data-action="next-day" aria-label="Nächster Tag" ${k >= t ? 'disabled' : ''}>›</button></div>`;
+  let h = `<div class="daynav"><button data-action="prev-day" aria-label="Vorheriger Tag" ${k <= minDate() ? 'disabled' : ''}>‹</button><label class="datepick">${dayLabel(k)}<small>${dateLong(k)}</small><input type="date" id="dpick" value="${k}" min="${minDate()}" max="${t}" aria-label="Tag auswählen"></label><button data-action="next-day" aria-label="Nächster Tag" ${k >= t ? 'disabled' : ''}>›</button></div>`;
   if (c) {
     const rem = c.target - tot.kcal, over = rem < 0, bal = tot.kcal - c.tdee, gain = S.profile.goal === 'gain';
     const gl = S.profile.goal === 'lose' ? `Abnehmen · ${fmt(c.delta)} kcal/Tag` : gain ? `Zunehmen · ${sgn(c.delta)} kcal/Tag` : 'Gewicht halten';
@@ -386,10 +405,17 @@ function profileHTML(){
     <button class="primary" data-action="save-profile">Profil speichern</button>
   </div></section>
   <section class="panel"><h2>Deine Werte</h2><hr class="rule"><div class="results" id="p-results"></div></section>
-  <section class="panel"><h2>Gewicht eintragen</h2><p class="muted" style="margin:4px 0 10px">Am besten morgens nüchtern. Dein Bedarf wird mit dem neuen Gewicht neu berechnet.</p><div class="weightlog"><div class="field"><label for="w-new">Heute, kg</label><input type="number" id="w-new" inputmode="decimal" step="0.1" placeholder="${esc(p.weight || '80,0')}"></div><button class="btn" data-action="log-weight">Eintragen</button></div></section>
+  <section class="panel"><h2>Gewicht</h2><p class="muted" style="margin:4px 0 10px">Am besten morgens nüchtern. Gleiches Datum nochmal eintragen überschreibt den Wert. Dein Bedarf rechnet immer mit dem neuesten Gewicht.</p>
+    <div class="weightlog"><div class="field"><label for="w-date">Datum</label><input type="date" id="w-date" value="${todayKey()}" max="${todayKey()}"></div><div class="field"><label for="w-new">kg</label><input type="number" id="w-new" inputmode="decimal" step="0.1" placeholder="${esc(p.weight || '80,0')}"></div><button class="btn" data-action="log-weight">Speichern</button></div>
+    ${weightListHTML(p)}</section>
   <section class="panel"><h2>Konto &amp; Darstellung</h2><hr class="rule">${acct}<hr class="hair"><div class="field"><span class="flabel">Erscheinungsbild</span><div class="seg" id="theme-seg">${radio('p-theme','system','System',theme)}${radio('p-theme','light','Marmor',theme)}${radio('p-theme','dark','Schwarzfigurig',theme)}</div></div></section>
   <div class="meander gold" aria-hidden="true"></div>
   <p class="disclaimer">Alle Nährwerte aus Fotos sind Schätzungen. Bedarf nach Mifflin-St-Jeor-Formel, Referenzwerte nach D-A-CH. Kein Ersatz für ärztliche oder diätologische Beratung.</p>`;
+}
+function weightListHTML(p){
+  const wl = (p.weightLog || []).slice().sort((a, b) => a.date < b.date ? 1 : -1);
+  if (!wl.length) return '';
+  return `<div class="daylist" id="w-list" style="margin-top:8px">${wl.slice(0, 40).map((w, i) => { const prev = wl[i + 1]; const d = prev ? w.kg - prev.kg : 0; return `<div class="wrow"><span><b>${fmt(w.kg, 1)} kg</b><small>${dayLabel(w.date)} · ${fromKey(w.date).toLocaleDateString('de-AT')}</small></span>${prev ? `<span class="pill ${d < 0 ? 'ok' : d > 0 ? 'over' : 'under'}">${sgn(d, 1)}</span>` : '<span></span>'}<button class="icon-btn" data-action="w-edit" data-date="${w.date}" aria-label="Bearbeiten">✎</button><button class="icon-btn" data-action="w-del" data-date="${w.date}" aria-label="Löschen">×</button></div>`; }).join('')}</div>`;
 }
 function readProfileForm(){
   const v = id => $('#' + id)?.value, r = n => document.querySelector(`input[name="${n}"]:checked`)?.value || '';
@@ -415,6 +441,16 @@ function updateProfileResults(){
   </div>
   ${c.eta ? `<p style="margin:0">Bei diesem Tempo erreichst du <b>${fmt(p.targetWeight, 1)} kg</b> in etwa <b>${fmt(c.eta.weeks)} Wochen</b> – rund um den ${c.eta.date.toLocaleDateString('de-AT',{day:'numeric',month:'long',year:'numeric'})}.</p>` : ''}
   ${c.warn ? `<div class="warnbox">${esc(c.warn)}</div>` : ''}`;
+}
+
+function applyWeights(p){
+  p.weightLog.sort((a, b) => a.date < b.date ? -1 : 1);
+  if (p.weightLog.length) p.weight = p.weightLog.at(-1).kg;
+  S.profile = p; const wi = $('#p-weight'); if (wi) wi.value = p.weight;
+  $('#w-new').value = ''; $('#w-date').value = todayKey();
+  const list = $('#w-list'), html = weightListHTML(p);
+  if (list) list.outerHTML = html || '<div id="w-list"></div>'; else $('#w-date').closest('.panel').insertAdjacentHTML('beforeend', html);
+  updateProfileResults(); saveProfile();
 }
 
 /* ───────── Bottom-Sheets ───────── */
@@ -517,10 +553,11 @@ function stopScan(){
 }
 function scannerHTML(msg){
   return `${head('Barcode scannen')}
-  <div class="scanner"><video id="bc-video" playsinline muted autoplay></video><div class="scan-frame"><i></i></div><p class="scan-msg" id="bc-msg">${msg || 'Kamera wird gestartet…'}</p></div>
+  <div class="scanner"><video id="bc-video" playsinline muted autoplay></video><div class="scan-frame"><i></i></div><button class="torch" id="bc-torch" type="button" aria-label="Licht an/aus" hidden><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 2h6l-1 6h-4zM10 8h4v13h-4zM12 12v3"/></svg></button><p class="scan-msg" id="bc-msg">${msg || 'Kamera wird gestartet…'}</p></div>
   <div class="add-item"><input id="bc-code" inputmode="numeric" pattern="[0-9]*" placeholder="oder Nummer eintippen, z. B. 4001686301265" aria-label="Barcode-Nummer"><button class="btn" data-action="bc-manual">Suchen</button></div>
   <label class="link" style="align-self:flex-start;cursor:pointer">Foto vom Barcode verwenden<input type="file" id="bc-file" accept="image/*" hidden></label>`;
 }
+function warmScanner(){ getDetector().then(d => { const c = document.createElement('canvas'); c.width = c.height = 16; return d.detect(c); }).catch(() => {}); }
 async function startScan(){
   S.pendingMeal = readMeal();
   setSheet(scannerHTML());
@@ -528,30 +565,44 @@ async function startScan(){
   const my = {stream:null, timer:null}; scan = my;
   let detector;
   try {
-    const [d, stream] = await Promise.all([getDetector(), navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}, width:{ideal:1280}, height:{ideal:720}}, audio:false})]);
+    const [d, stream] = await Promise.all([getDetector(), navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}, width:{ideal:1920}, height:{ideal:1080}}, audio:false})]);
     if (scan !== my) { stream.getTracks().forEach(t => t.stop()); return; }
     detector = d; my.stream = stream; video.srcObject = stream; await video.play().catch(() => {});
+    const track = stream.getVideoTracks()[0], caps = track.getCapabilities?.() || {};
+    const adv = [];
+    if (caps.focusMode?.includes('continuous')) adv.push({focusMode:'continuous'});
+    if (caps.zoom && caps.zoom.max >= 1.5) adv.push({zoom:Math.min(caps.zoom.max, 1.6)});
+    if (adv.length) track.applyConstraints({advanced:adv}).catch(() => {});
+    if (caps.torch) { const tb = $('#bc-torch'); tb.hidden = false; let on = false; tb.onclick = () => { on = !on; track.applyConstraints({advanced:[{torch:on}]}).catch(() => {}); tb.classList.toggle('on', on); }; }
     msg.textContent = 'Halte den Barcode in den Rahmen';
   } catch(e) {
     if (scan !== my) return;
     msg.textContent = e?.name === 'NotAllowedError' ? 'Kein Kamerazugriff. Erlaube die Kamera in den Browser-Einstellungen – oder tippe die Nummer ein.' : e?.name ? 'Kamera nicht verfügbar. Tippe die Nummer ein oder nimm ein Foto vom Barcode.' : 'Der Scanner konnte nicht geladen werden. Tippe die Nummer ein.';
     return;
   }
-  const seen = {};
+  // Nur den Bereich im Rahmen auswerten – kleiner = deutlich schneller und treffsicherer
+  const cv = document.createElement('canvas'), cx = cv.getContext('2d', {willReadFrequently:true});
+  let frame = 0;
   const tick = async () => {
     if (scan !== my) return;
     try {
-      if (video.readyState >= 2) {
-        const res = await detector.detect(video);
+      const vw = video.videoWidth, vh = video.videoHeight;
+      if (video.readyState >= 2 && vw) {
+        let src = video;
+        if (frame++ % 4 !== 3) {
+          const sw = vw * 0.86, sh = vh * 0.5, sc = Math.min(1, 900 / sw);
+          cv.width = Math.round(sw * sc); cv.height = Math.round(sh * sc);
+          cx.drawImage(video, (vw - sw) / 2, (vh - sh) / 2, sw, sh, 0, 0, cv.width, cv.height);
+          src = cv;
+        }
+        const res = await detector.detect(src);
         for (const r of res) {
           const c = String(r.rawValue || '').replace(/\D/g, '');
-          if (!validEAN(c)) continue;
-          seen[c] = (seen[c] || 0) + 1;
-          if (seen[c] >= 2 || 'BarcodeDetector' in window) { navigator.vibrate?.(60); onBarcode(c); return; }
+          if (validEAN(c)) { navigator.vibrate?.(60); onBarcode(c); return; }
         }
       }
     } catch(e) {}
-    if (scan === my) my.timer = setTimeout(tick, 120);
+    if (scan === my) my.timer = setTimeout(tick, 40);
   };
   tick();
 }
@@ -665,7 +716,7 @@ function editorHTML(){
   return `${head(d.isNew ? 'Eintrag prüfen' : 'Eintrag bearbeiten')}
   ${d.confidence || d.note ? `<p class="ai-note">${d.confidence ? `<span class="conf conf-${esc(d.confidence)}">Sicherheit ${esc(d.confidence)}.</span>` : ''}${esc(d.note)}</p>` : ''}
   <div class="ed-top">${d.thumb ? `<img class="ed-thumb" src="${d.thumb}" alt="">` : ''}<div class="field grow"><label for="ed-title">Name</label><input id="ed-title" value="${esc(d.title)}" placeholder="z. B. Griechischer Salat"></div></div>
-  <div class="grid2"><div class="field"><label for="ed-meal">Mahlzeit</label><select id="ed-meal">${MEALS.map(m => `<option value="${m.k}" ${m.k === d.meal ? 'selected' : ''}>${m.l}</option>`).join('')}</select></div><div class="field"><label for="ed-date">Tag</label><input type="date" id="ed-date" value="${d.date}" max="${todayKey()}"></div></div>
+  <div class="grid2"><div class="field"><label for="ed-meal">Mahlzeit</label><select id="ed-meal">${MEALS.map(m => `<option value="${m.k}" ${m.k === d.meal ? 'selected' : ''}>${m.l}</option>`).join('')}</select></div><div class="field"><label for="ed-date">Tag</label><input type="date" id="ed-date" value="${d.date}" min="${minDate()}" max="${todayKey()}"></div></div>
   <div class="ed-total" id="ed-total">${totalHTML(t)}</div>
   <p class="sub">Komponenten – Menge ändern rechnet alle Werte mit</p>
   <div class="items">${d.items.map(itemHTML).join('') || '<p class="muted" style="margin:0">Noch keine Komponenten. Füge unten eine hinzu.</p>'}</div>
@@ -675,7 +726,7 @@ function editorHTML(){
   <div class="sheet-actions">${!d.isNew ? `<button class="danger" data-action="del-entry">Löschen</button>${d.date !== todayKey() ? '<button class="btn" data-action="copy-today">Heute nochmal</button>' : ''}` : ''}<button class="primary" data-action="save-entry">Speichern</button></div>`;
 }
 function refreshTotal(){ const el = $('#ed-total'); if (el && S.draft) el.innerHTML = totalHTML(sumItems(S.draft.items)); }
-function syncDraftMeta(){ if (!S.draft) return; const t = $('#ed-title'), m = $('#ed-meal'), d = $('#ed-date'); if (t) S.draft.title = t.value; if (m) S.draft.meal = m.value; if (d && d.value) S.draft.date = d.value > todayKey() ? todayKey() : d.value; }
+function syncDraftMeta(){ if (!S.draft) return; const t = $('#ed-title'), m = $('#ed-meal'), d = $('#ed-date'); if (t) S.draft.title = t.value; if (m) S.draft.meal = m.value; if (d && d.value) S.draft.date = d.value > todayKey() ? todayKey() : d.value < minDate() ? minDate() : d.value; }
 async function editorAI(prompt, img, apply, msg){
   syncDraftMeta(); const b = $('#ed-busy'); b.innerHTML = busyHTML(msg); lock(true);
   try { const res = await ask(prompt, img); apply(res); setSheet(editorHTML()); toast('Aktualisiert'); }
@@ -685,11 +736,11 @@ async function editorAI(prompt, img, apply, msg){
 /* ───────── Aktionen ───────── */
 const H = {
   tab: a => { S.view = a.dataset.view; render(); window.scrollTo(0, 0); },
-  'prev-day': () => { S.date = addDays(S.date, -1); render(); },
+  'prev-day': () => { if (S.date > minDate()) { S.date = addDays(S.date, -1); render(); } },
   'next-day': () => { if (S.date < todayKey()) { S.date = addDays(S.date, 1); render(); } },
   'goto-day': a => { S.date = a.dataset.date; S.view = 'today'; render(); window.scrollTo(0, 0); },
   range: a => { S.range = +a.dataset.n; render(); },
-  'open-add': () => { aiCtl?.abort(); S.draftImg = null; const html = addMenuHTML(); $('#sheet-body') ? setSheet(html) : openSheet(html); },
+  'open-add': () => { warmScanner(); aiCtl?.abort(); S.draftImg = null; const html = addMenuHTML(); $('#sheet-body') ? setSheet(html) : openSheet(html); },
   'close-sheet': closeSheet,
   scan: () => startScan(),
   'bc-manual': () => { const c = ($('#bc-code')?.value || '').replace(/\D/g, ''); if (!/^\d{8,14}$/.test(c)) { toast('Gib die 8- oder 13-stellige Nummer unter dem Barcode ein.'); return; } onBarcode(c); },
@@ -761,10 +812,18 @@ const H = {
     S.profile = p; saveProfile(); S.view = 'today'; render(); window.scrollTo(0, 0); toast('Profil gespeichert');
   },
   'log-weight': () => {
-    const kg = num($('#w-new')?.value); if (!(kg > 25 && kg < 400)) { toast('Gib ein gültiges Gewicht ein.'); return; }
-    const p = {...readProfileForm()}; p.weight = kg; p.weightLog = (p.weightLog || []).filter(w => w.date !== todayKey()); p.weightLog.push({date:todayKey(), kg}); p.weightLog.sort((a, b) => a.date < b.date ? -1 : 1);
-    S.profile = p; const wi = $('#p-weight'); if (wi) wi.value = kg; $('#w-new').value = ''; updateProfileResults(); saveProfile(); toast('Gewicht eingetragen');
+    const kg = num($('#w-new')?.value), date = $('#w-date')?.value || todayKey();
+    if (!(kg > 25 && kg < 400)) { toast('Gib ein gültiges Gewicht ein.'); return; }
+    if (date > todayKey()) { toast('Das Datum liegt in der Zukunft.'); return; }
+    const p = {...readProfileForm()}; p.weightLog = (p.weightLog || []).filter(w => w.date !== date); p.weightLog.push({date, kg});
+    applyWeights(p); toast('Gewicht gespeichert');
   },
+  'w-edit': a => { const w = (S.profile?.weightLog || []).find(x => x.date === a.dataset.date); if (!w) return; $('#w-date').value = w.date; $('#w-new').value = w.kg; $('#w-new').focus(); },
+  'w-del': a => {
+    if (!a.classList.contains('armed')) { a.classList.add('armed'); a.textContent = '?'; a.setAttribute('aria-label', 'Wirklich löschen?'); setTimeout(() => { if (a.isConnected) { a.classList.remove('armed'); a.textContent = '×'; } }, 3000); return; }
+    const p = {...readProfileForm()}; p.weightLog = (p.weightLog || []).filter(w => w.date !== a.dataset.date); applyWeights(p); toast('Eintrag gelöscht');
+  },
+
   'sign-out': signOutNow,
   'go-login': () => { lsSet(K_MODE, null); showLogin(); },
 };
@@ -781,7 +840,7 @@ document.addEventListener('change', e => {
   if (t.id === 'bc-file') { const f = t.files?.[0]; t.value = ''; scanFile(f); return; }
   if (t.id === 'nf-file') { const f = t.files?.[0]; t.value = ''; readLabel(f); return; }
   if (t.id === 'f-cam' || t.id === 'f-gal') { const f = t.files?.[0]; t.value = ''; onPhoto(f); return; }
-  if (t.id === 'dpick' && t.value) { S.date = t.value > todayKey() ? todayKey() : t.value; render(); return; }
+  if (t.id === 'dpick' && t.value) { S.date = t.value > todayKey() ? todayKey() : t.value < minDate() ? minDate() : t.value; render(); return; }
   if (t.name === 'p-theme') { const v = t.value; if (v === 'system') { delete document.documentElement.dataset.theme; lsSet(K_THEME, null); } else { document.documentElement.dataset.theme = v; lsSet(K_THEME, v); } return; }
   if (t.closest('#pform')) updateProfileResults();
 });

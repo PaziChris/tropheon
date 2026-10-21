@@ -284,7 +284,7 @@ textarea{resize:vertical}
 .scanner{position:relative;border-radius:var(--r);overflow:hidden;background:#000;aspect-ratio:4/3;max-width:100%;border:2px solid var(--gold)}
 .scanner video{width:100%;height:100%;object-fit:cover;display:block}
 .scan-frame{position:absolute;inset:0;display:grid;place-items:center;pointer-events:none}
-.scan-frame i{width:74%;height:38%;border:3px solid var(--accent);border-radius:6px;box-shadow:0 0 0 999px rgba(0,0,0,.35);position:relative;overflow:hidden}
+.scan-frame i{width:86%;height:50%;border:3px solid var(--accent);border-radius:6px;box-shadow:0 0 0 999px rgba(0,0,0,.35);position:relative;overflow:hidden}
 .scan-frame i::after{content:"";position:absolute;left:0;right:0;height:2px;background:var(--accent);top:50%;animation:scanline 1.6s ease-in-out infinite alternate}
 @keyframes scanline{from{top:8%}to{top:92%}}
 .scan-msg{position:absolute;left:0;right:0;bottom:0;margin:0;padding:10px 12px;background:rgba(0,0,0,.6);color:#fff;font-size:14px;text-align:center}
@@ -298,3 +298,11 @@ textarea{resize:vertical}
 .prod img,.prod .thumb{width:72px;height:72px;border-radius:var(--r);object-fit:contain;background:#fff;border:1px solid var(--line)}
 .prod b{display:block;font-size:17px;line-height:1.25}
 .prod small{display:block;font-size:13px}
+.torch{position:absolute;top:10px;right:10px;width:44px;height:44px;border-radius:50%;border:0;background:rgba(0,0,0,.55);color:#fff;display:grid;place-items:center}
+.torch.on{background:var(--gold);color:#1d0e06}
+.wrow{display:grid;grid-template-columns:1fr auto auto auto;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid var(--line)}
+.wrow:last-child{border-bottom:0}
+.wrow small{display:block;color:var(--muted);font-size:13px}
+.icon-btn.armed{background:var(--bad);color:var(--surface);border-color:var(--bad)}
+.weightlog{flex-wrap:wrap}
+.weightlog .field{min-width:120px}
