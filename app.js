@@ -66,7 +66,7 @@ function toast(msg){ const t = $('#toast'); t.textContent = msg; t.hidden = fals
 
 /* ───────── Zustand ───────── */
 const S = { profile:null, days:{}, view:'today', date:todayKey(), range:7, mode:'boot', user:null,
-  draft:null, draftImg:null, pendingMeal:defaultMeal(), ai:'off' };
+  draft:null, draftImg:null, product:null, portion:null, pendingMeal:defaultMeal(), ai:'off' };
 let cacheKey = K_LOCAL;
 function loadCache(){ try { const o = JSON.parse(lsGet(cacheKey) || 'null'); S.profile = o?.profile || null; S.days = o?.days || {}; } catch(e) { S.profile = null; S.days = {}; } }
 function saveCache(){ lsSet(cacheKey, JSON.stringify({profile:S.profile, days:S.days})); }
@@ -125,14 +125,15 @@ async function initFirebase(){
   let db;
   try { db = fsM.initializeFirestore(app, {localCache: fsM.persistentLocalCache({tabManager: fsM.persistentMultipleTabManager()})}); }
   catch(e) { db = fsM.getFirestore(app); }
-  let model = null;
+  let models = [];
   try {
     const aiM = await import(FB + 'firebase-ai.js');
     const ai = aiM.getAI(app, {backend: new aiM.GoogleAIBackend()});
-    model = aiM.getGenerativeModel(ai, {model: CONFIG.geminiModel || 'gemini-3.5-flash',
-      generationConfig: {responseMimeType:'application/json', temperature:0.2}});
+    const gc = {responseMimeType:'application/json', temperature:0.2};
+    const names = [CONFIG.geminiModel || 'gemini-3.5-flash', ...(CONFIG.fallbackModels || ['gemini-3.5-flash-lite', 'gemini-3.1-flash-lite'])];
+    models = [...new Set(names)].map(n => ({name:n, m:aiM.getGenerativeModel(ai, {model:n, generationConfig:gc})}));
   } catch(e) { console.warn('AI Logic', e); }
-  fb = {app, auth, db, authM, fsM, model};
+  fb = {app, auth, db, authM, fsM, models, model:models[0]?.m || null};
   S.ai = model ? 'on' : 'off';
   authM.getRedirectResult(auth).catch(e => showLoginError(e));
   authM.onAuthStateChanged(auth, u => {
@@ -218,36 +219,57 @@ function parseJSON(t){
   const a = t.indexOf('{'), b = t.lastIndexOf('}'); if (a >= 0 && b > a) { try { return JSON.parse(t.slice(a, b+1)); } catch(e) {} }
   throw {code:'invalid_json'};
 }
-let aiCtl = null;
+let aiCtl = null, modelIdx = 0;
+const isQuota = m => /\b429\b|RESOURCE_EXHAUSTED|quota|Too Many Requests|rate.?limit/i.test(m);
+const isRetryable = m => isQuota(m) || /\b(404|500|503|504)\b|UNAVAILABLE|overloaded|not found|deadline/i.test(m);
 async function ask(prompt, img){
-  if (!fb?.model) throw {code:'off'};
+  if (!fb?.models?.length) throw {code:'off'};
   aiCtl = new AbortController(); const sig = aiCtl.signal;
   const parts = [{text:prompt}]; if (img) parts.push({inlineData:{data:img.b64, mimeType:img.mime}});
-  const res = await new Promise((ok, fail) => {
-    sig.addEventListener('abort', () => fail({code:'cancelled'}));
-    fb.model.generateContent(parts).then(ok, fail);
-  });
-  return parseJSON(res.response.text());
+  let lastErr;
+  // Ein Modell nach dem anderen probieren: wenn eines überlastet oder sein Kontingent leer ist, nimmt das nächste
+  for (let n = 0; n < fb.models.length; n++) {
+    const i = (modelIdx + n) % fb.models.length;
+    try {
+      const res = await new Promise((ok, fail) => {
+        const t = setTimeout(() => fail({code:'timeout'}), 45000);
+        sig.addEventListener('abort', () => { clearTimeout(t); fail({code:'cancelled'}); });
+        fb.models[i].m.generateContent(parts).then(r => { clearTimeout(t); ok(r); }, e => { clearTimeout(t); fail(e); });
+      });
+      modelIdx = i;
+      return parseJSON(res.response.text());
+    } catch(e) {
+      lastErr = e; const m = String(e?.message || '');
+      console.warn('KI', fb.models[i].name, e);
+      if (e?.code === 'cancelled' || e?.code === 'invalid_json') throw e;
+      if (!(e?.code === 'timeout' || isRetryable(m))) throw e;
+    }
+  }
+  throw lastErr;
 }
 function aiError(e){
   const c = e?.code, m = String(e?.message || e || '');
   if (c === 'cancelled') return null;
   if (c === 'off') return configured ? 'Die KI ist nicht erreichbar. Prüfe Firebase AI Logic (README Schritt 5).' : 'Die Foto-Analyse braucht ein verbundenes Firebase-Projekt (siehe README). Du kannst manuell eintragen.';
   if (c === 'invalid_json') return 'Die Antwort war unvollständig. Bitte nochmal versuchen.';
-  if (/app.?check/i.test(m)) return 'App Check blockiert die Anfrage. Richte reCAPTCHA ein (README Schritt 6).';
-  if (/quota|429|RESOURCE_EXHAUSTED|rate/i.test(m)) return 'Das KI-Kontingent ist gerade erschöpft. Warte kurz und versuch es nochmal.';
-  if (/SAFETY|blocked|RECITATION/i.test(m)) return 'Zu diesem Bild konnte keine Schätzung erstellt werden. Versuch ein anderes Foto.';
-  if (/API key|api-not-enabled|PERMISSION_DENIED|403|not enabled/i.test(m)) return 'Firebase AI Logic ist noch nicht aktiviert (README Schritt 5).';
-  if (/not found|404|model/i.test(m)) return 'Das KI-Modell wurde nicht gefunden. Prüfe „geminiModel“ in firebase-config.js.';
-  return 'Verbindungsproblem. Bitte nochmal versuchen.';
+  if (c === 'timeout') return 'Die KI antwortet gerade zu langsam. Versuch es gleich nochmal – oder scanne den Barcode.';
+  let msg;
+  if (/app.?check|attestation|recaptcha/i.test(m)) msg = 'App Check blockiert die Anfrage.';
+  else if (isQuota(m)) msg = 'Das kostenlose KI-Kontingent ist für den Moment aufgebraucht. In ein paar Minuten geht es wieder – Barcode-Scan und manuelle Eingabe funktionieren immer.';
+  else if (/SAFETY|blocked|RECITATION/i.test(m)) msg = 'Zu diesem Bild konnte keine Schätzung erstellt werden. Versuch ein anderes Foto.';
+  else if (/api-not-enabled|SERVICE_DISABLED|has not been used|is disabled/i.test(m)) msg = 'Die Gemini-API ist im Firebase-Projekt noch nicht aktiviert (AI Logic → Jetzt starten).';
+  else if (/PERMISSION_DENIED|\b403\b|API key/i.test(m)) msg = 'Zugriff verweigert – Firebase AI Logic oder App Check prüfen.';
+  else if (/network|Failed to fetch|offline/i.test(m)) msg = 'Keine Verbindung. Prüfe dein Internet.';
+  else msg = 'Die KI-Anfrage ist fehlgeschlagen. Bitte nochmal versuchen.';
+  return msg + '\n\nTechnisch: ' + m.slice(0, 220);
 }
 function loadImage(file){ return new Promise((ok, fail) => { const url = URL.createObjectURL(file), img = new Image(); img.onload = () => ok({img, url}); img.onerror = () => { URL.revokeObjectURL(url); fail(new Error('decode')); }; img.src = url; }); }
 async function prepImage(file){
   const {img, url} = await loadImage(file);
-  const max = 1280, sc = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+  const max = 1024, sc = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
   const c = document.createElement('canvas'); c.width = Math.round(img.naturalWidth*sc); c.height = Math.round(img.naturalHeight*sc);
   c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
-  const b64 = c.toDataURL('image/jpeg', 0.85).split(',')[1];
+  const b64 = c.toDataURL('image/jpeg', 0.8).split(',')[1];
   const s = 150, t = document.createElement('canvas'); t.width = s; t.height = s;
   const r = Math.max(s/img.naturalWidth, s/img.naturalHeight);
   t.getContext('2d').drawImage(img, (s - img.naturalWidth*r)/2, (s - img.naturalHeight*r)/2, img.naturalWidth*r, img.naturalHeight*r);
@@ -397,8 +419,8 @@ function updateProfileResults(){
 
 /* ───────── Bottom-Sheets ───────── */
 function openSheet(html){ $('#sheet-root').innerHTML = `<div class="scrim" id="scrim"><div class="sheet" role="dialog" aria-modal="true"><div class="grab"></div><div id="sheet-body">${html}</div></div></div>`; document.body.style.overflow = 'hidden'; }
-function setSheet(html){ const b = $('#sheet-body'); if (b) b.innerHTML = html; else openSheet(html); }
-function closeSheet(){ aiCtl?.abort(); $('#sheet-root').innerHTML = ''; document.body.style.overflow = ''; S.draft = null; S.draftImg = null; }
+function setSheet(html){ stopScan(); const b = $('#sheet-body'); if (b) b.innerHTML = html; else openSheet(html); }
+function closeSheet(){ stopScan(); aiCtl?.abort(); $('#sheet-root').innerHTML = ''; document.body.style.overflow = ''; S.draft = null; S.draftImg = null; }
 const head = t => `<div class="sheet-head"><h2>${t}</h2><button class="icon-btn" data-action="close-sheet" aria-label="Schließen">×</button></div>`;
 const mealSeg = cur => `<div class="seg" role="radiogroup" aria-label="Mahlzeit">${MEALS.map(m => `<label><input type="radio" name="add-meal" value="${m.k}" ${m.k === cur ? 'checked' : ''}><span>${m.s}</span></label>`).join('')}</div>`;
 const readMeal = () => document.querySelector('input[name="add-meal"]:checked')?.value || S.pendingMeal;
@@ -408,13 +430,202 @@ function addMenuHTML(){
   <p class="muted" style="margin:-6px 0 0">${S.date === todayKey() ? 'Für heute' : 'Für ' + dayLabel(S.date) + ', ' + dateLong(S.date)}</p>
   ${mealSeg(S.pendingMeal)}
   <div class="add-grid">
-    <label class="add-opt big" ${off ? 'aria-disabled="true"' : ''}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg><span><b>Foto aufnehmen</b><br><small>Kamera öffnen und Teller fotografieren</small></span><input type="file" id="f-cam" accept="image/*" capture="environment" hidden></label>
+    <button class="add-opt big" data-action="scan"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 7V4h3M18 4h3v3M21 17v3h-3M6 20H3v-3M7 8v8M10 8v8M13 8v8M16 8v8"/></svg><span><b>Barcode scannen</b><br><small>Verpackte Produkte – sofort und ohne KI</small></span></button>
+    <label class="add-opt big" ${off ? 'aria-disabled="true"' : ''}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg><span><b>Teller fotografieren</b><br><small>KI erkennt Speisen und Menge</small></span><input type="file" id="f-cam" accept="image/*" capture="environment" hidden></label>
     <label class="add-opt" ${off ? 'aria-disabled="true"' : ''}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m3 16 5-5 4 4 3-3 6 6"/><circle cx="16" cy="9" r="1.5"/></svg><b>Aus Galerie</b><small>Vorhandenes Foto wählen</small><input type="file" id="f-gal" accept="image/*" hidden></label>
     <button class="add-opt" data-action="add-text" ${off ? 'aria-disabled="true"' : ''}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 6h16M4 11h16M4 16h10"/></svg><b>Beschreiben</b><small>„2 Spiegeleier und ein Vollkornbrot“</small></button>
-    <button class="add-opt" data-action="add-manual"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 20h4L19 9l-4-4L4 16z"/></svg><b>Manuell</b><small>Werte selbst eintippen, z. B. von der Packung</small></button>
+    <button class="add-opt" data-action="add-manual"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 20h4L19 9l-4-4L4 16z"/></svg><b>Manuell</b><small>Werte selbst eintippen</small></button>
+    <button class="add-opt" data-action="recent-meals"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 7v5l3 2"/><circle cx="12" cy="12" r="9"/></svg><b>Schon gegessen</b><small>Frühere Mahlzeit nochmal eintragen</small></button>
   </div>
+  ${recentProductsHTML()}
   ${off ? `<p class="ai-note">${esc(aiError({code:'off'}))}</p>` : ''}`;
 }
+
+/* ───────── Barcode-Scanner + Produktdatenbank (Open Food Facts) ───────── */
+const K_PRODUCTS = 'tropheon.products';
+const BC_FORMATS = ['ean_13', 'ean_8', 'upc_a', 'upc_e'];
+const BC_LIB = 'https://cdn.jsdelivr.net/npm/barcode-detector@3.2.2/dist/es/ponyfill.js';
+// Open Food Facts speichert *_100g in Grundeinheit (g); Faktor rechnet in die App-Einheit um
+const OFF_MAP = {protein:['proteins',1], carbs:['carbohydrates',1], fat:['fat',1], fiber:['fiber',1], sugar:['sugars',1], satfat:['saturated-fat',1],
+  vitA:['vitamin-a',1e6], vitB12:['vitamin-b12',1e6], vitC:['vitamin-c',1e3], vitD:['vitamin-d',1e6], vitE:['vitamin-e',1e3], folate:['folates',1e6],
+  calcium:['calcium',1e3], iron:['iron',1e3], magnesium:['magnesium',1e3], potassium:['potassium',1e3], sodium:['sodium',1e3]};
+
+function productCache(){ try { return JSON.parse(lsGet(K_PRODUCTS) || '{}') || {}; } catch(e) { return {}; } }
+function cacheProduct(p){
+  const c = productCache(); c[p.code] = {...p, used:Date.now()};
+  const keep = Object.keys(c).sort((a, b) => (c[b].used || 0) - (c[a].used || 0)).slice(0, 80);
+  const o = {}; keep.forEach(k => o[k] = c[k]); lsSet(K_PRODUCTS, JSON.stringify(o));
+  if (S.mode === 'cloud') { const {db, fsM} = fb; fsM.setDoc(fsM.doc(db, 'users', S.user.uid, 'products', p.code), clone({...p, used:Date.now()})).catch(() => {}); }
+}
+async function cloudProduct(code){
+  if (S.mode !== 'cloud') return null;
+  try { const {db, fsM} = fb; const s = await fsM.getDoc(fsM.doc(db, 'users', S.user.uid, 'products', code)); return s.exists() ? s.data() : null; } catch(e) { return null; }
+}
+function recentProductsHTML(){
+  const list = Object.values(productCache()).filter(p => p.per100?.kcal >= 0 && p.hasNutri).sort((a, b) => (b.used || 0) - (a.used || 0)).slice(0, 8);
+  if (!list.length) return '';
+  return `<div class="field"><span class="flabel">Zuletzt gescannt</span><div class="chips">${list.map(p => `<button class="chip" data-action="open-product" data-code="${esc(p.code)}">${p.img ? `<img src="${esc(p.img)}" alt="" loading="lazy">` : ''}<span>${esc(p.name)}</span></button>`).join('')}</div></div>`;
+}
+const validEAN = c => {
+  if (!/^\d{8}$|^\d{12,14}$/.test(c)) return false;
+  const d = c.split('').map(Number), chk = d.pop();
+  const sum = d.reverse().reduce((s, v, i) => s + v * (i % 2 ? 1 : 3), 0);
+  return (10 - sum % 10) % 10 === chk;
+};
+function parseOFF(code, p){
+  const n = p.nutriments || {};
+  const g = k => { const v = n[k + '_100g']; return v === undefined || v === '' ? null : num(v); };
+  const per100 = {};
+  let kcal = g('energy-kcal'); if (kcal == null && g('energy') != null) kcal = g('energy') / 4.184;
+  per100.kcal = kcal ?? 0;
+  Object.entries(OFF_MAP).forEach(([k, [off, f]]) => { const v = g(off) ?? (k === 'folate' ? g('vitamin-b9') : null); per100[k] = v == null ? 0 : v * f; });
+  if (!per100.sodium && g('salt') != null) per100.sodium = g('salt') / 2.5 * 1000;
+  Object.keys(per100).forEach(k => per100[k] = Math.round(per100[k] * 100) / 100);
+  const serving = num(p.serving_quantity) > 0 ? num(p.serving_quantity) : null;
+  return {code, name:String(p.product_name_de || p.product_name || p.generic_name_de || 'Produkt ' + code).trim().slice(0, 80), brand:String(p.brands || '').split(',')[0].trim().slice(0, 40),
+    qty:String(p.quantity || '').slice(0, 30), img:p.image_front_small_url || p.image_small_url || null, per100, serving, servingLabel:String(p.serving_size || '').slice(0, 40),
+    hasNutri:kcal != null, source:'off'};
+}
+async function lookupBarcode(code){
+  const local = productCache()[code]; if (local) return local;
+  const cloud = await cloudProduct(code); if (cloud) { cacheProduct(cloud); return cloud; }
+  const fields = 'code,product_name,product_name_de,generic_name_de,brands,quantity,serving_size,serving_quantity,image_front_small_url,image_small_url,nutriments';
+  const ctl = new AbortController(), t = setTimeout(() => ctl.abort(), 12000);
+  try {
+    const r = await fetch(`https://world.openfoodfacts.org/api/v2/product/${code}.json?lc=de&fields=${fields}`, {signal:ctl.signal});
+    if (r.status === 404) return null;
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json(); if (j.status !== 1 || !j.product) return null;
+    const p = parseOFF(code, j.product); cacheProduct(p); return p;
+  } finally { clearTimeout(t); }
+}
+
+let scan = null;
+let detectorP = null;
+function getDetector(){
+  return detectorP ||= (async () => {
+    if ('BarcodeDetector' in window) {
+      try { const f = await window.BarcodeDetector.getSupportedFormats(); if (f.includes('ean_13')) return new window.BarcodeDetector({formats:BC_FORMATS.filter(x => f.includes(x))}); } catch(e) {}
+    }
+    const m = await import(BC_LIB);
+    return new m.BarcodeDetector({formats:BC_FORMATS});
+  })().catch(e => { detectorP = null; throw e; });
+}
+function stopScan(){
+  if (!scan) return; const s = scan; scan = null;
+  clearTimeout(s.timer); s.stream?.getTracks().forEach(t => t.stop());
+}
+function scannerHTML(msg){
+  return `${head('Barcode scannen')}
+  <div class="scanner"><video id="bc-video" playsinline muted autoplay></video><div class="scan-frame"><i></i></div><p class="scan-msg" id="bc-msg">${msg || 'Kamera wird gestartet…'}</p></div>
+  <div class="add-item"><input id="bc-code" inputmode="numeric" pattern="[0-9]*" placeholder="oder Nummer eintippen, z. B. 4001686301265" aria-label="Barcode-Nummer"><button class="btn" data-action="bc-manual">Suchen</button></div>
+  <label class="link" style="align-self:flex-start;cursor:pointer">Foto vom Barcode verwenden<input type="file" id="bc-file" accept="image/*" hidden></label>`;
+}
+async function startScan(){
+  S.pendingMeal = readMeal();
+  setSheet(scannerHTML());
+  const video = $('#bc-video'), msg = $('#bc-msg');
+  const my = {stream:null, timer:null}; scan = my;
+  let detector;
+  try {
+    const [d, stream] = await Promise.all([getDetector(), navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}, width:{ideal:1280}, height:{ideal:720}}, audio:false})]);
+    if (scan !== my) { stream.getTracks().forEach(t => t.stop()); return; }
+    detector = d; my.stream = stream; video.srcObject = stream; await video.play().catch(() => {});
+    msg.textContent = 'Halte den Barcode in den Rahmen';
+  } catch(e) {
+    if (scan !== my) return;
+    msg.textContent = e?.name === 'NotAllowedError' ? 'Kein Kamerazugriff. Erlaube die Kamera in den Browser-Einstellungen – oder tippe die Nummer ein.' : e?.name ? 'Kamera nicht verfügbar. Tippe die Nummer ein oder nimm ein Foto vom Barcode.' : 'Der Scanner konnte nicht geladen werden. Tippe die Nummer ein.';
+    return;
+  }
+  const seen = {};
+  const tick = async () => {
+    if (scan !== my) return;
+    try {
+      if (video.readyState >= 2) {
+        const res = await detector.detect(video);
+        for (const r of res) {
+          const c = String(r.rawValue || '').replace(/\D/g, '');
+          if (!validEAN(c)) continue;
+          seen[c] = (seen[c] || 0) + 1;
+          if (seen[c] >= 2 || 'BarcodeDetector' in window) { navigator.vibrate?.(60); onBarcode(c); return; }
+        }
+      }
+    } catch(e) {}
+    if (scan === my) my.timer = setTimeout(tick, 120);
+  };
+  tick();
+}
+async function scanFile(file){
+  if (!file) return; const msg = $('#bc-msg'); if (msg) msg.textContent = 'Suche Barcode im Foto…';
+  try {
+    const d = await getDetector(), bmp = await createImageBitmap(file), res = await d.detect(bmp);
+    const c = res.map(r => String(r.rawValue || '').replace(/\D/g, '')).find(validEAN);
+    if (c) onBarcode(c); else if (msg) msg.textContent = 'Kein Barcode im Foto gefunden. Versuch es näher und scharf – oder tippe die Nummer ein.';
+  } catch(e) { if (msg) msg.textContent = 'Das Foto konnte nicht gelesen werden. Tippe die Nummer ein.'; }
+}
+async function onBarcode(code){
+  stopScan();
+  setSheet(`${head('Barcode ' + esc(code))}<div class="busy"><div class="spin"></div><div class="grow"><b>Suche Produkt…</b><br><small class="muted">Open Food Facts Datenbank</small></div></div>`);
+  try {
+    const p = await lookupBarcode(code);
+    if (p && p.hasNutri) { S.product = p; S.portion = null; setSheet(productHTML()); }
+    else notFoundSheet(code, p);
+  } catch(e) {
+    setSheet(`${head('Barcode ' + esc(code))}<p class="ai-note">Die Produktdatenbank ist gerade nicht erreichbar. Prüfe deine Verbindung.</p><div class="sheet-actions"><button class="btn" data-action="scan">Nochmal scannen</button><button class="primary" data-action="bc-retry" data-code="${esc(code)}">Erneut suchen</button></div>`);
+  }
+}
+function notFoundSheet(code, p){
+  S.product = p || {code, name:'', brand:'', per100:{}, hasNutri:false};
+  setSheet(`${head('Produkt unbekannt')}
+  <p style="margin:0">${p?.name ? `<b>${esc(p.name)}</b> ist bekannt, aber ohne Nährwerte.` : `Den Barcode <b>${esc(code)}</b> kennt die Datenbank noch nicht.`} Fotografiere die <b>Nährwerttabelle</b> auf der Packung – TROPHEON merkt sich das Produkt, beim nächsten Scan ist es sofort da.</p>
+  <div class="field"><label for="nf-name">Produktname</label><input id="nf-name" value="${esc(p?.name || '')}" placeholder="z. B. Skyr Natur"></div>
+  <div id="nf-busy"></div>
+  <div class="add-grid">
+    <label class="add-opt big" ${S.ai !== 'on' ? 'aria-disabled="true"' : ''}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="3" width="16" height="18" rx="1"/><path d="M8 8h8M8 12h8M8 16h5"/></svg><span><b>Nährwerttabelle fotografieren</b><br><small>KI liest die Werte pro 100 g ab</small></span><input type="file" id="nf-file" accept="image/*" capture="environment" hidden></label>
+    <button class="add-opt" data-action="nf-manual"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 20h4L19 9l-4-4L4 16z"/></svg><b>Werte eintippen</b><small>pro 100 g von der Packung</small></button>
+    <button class="add-opt" data-action="scan"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 7V4h3M18 4h3v3M21 17v3h-3M6 20H3v-3M7 8v8M10 8v8M13 8v8M16 8v8"/></svg><b>Nochmal scannen</b><small>Anderer Barcode</small></button>
+  </div>`);
+}
+async function readLabel(file){
+  if (!file) return; const busy = $('#nf-busy'), name = $('#nf-name')?.value.trim() || '';
+  let img; try { img = await prepImage(file); } catch(e) { toast('Das Bild kann nicht geöffnet werden.'); return; }
+  busy.innerHTML = busyHTML('Lese die Nährwerttabelle…');
+  const keys = NUTS.map(n => n.k).join(', ');
+  try {
+    const res = await ask(`Auf dem Bild ist die Nährwerttabelle (und evtl. Vorderseite) einer Lebensmittelverpackung.${name ? ` Produkt: "${name}".` : ''} Lies die Werte PRO 100 g (bzw. 100 ml) exakt ab. Fehlende Vitamine/Mineralstoffe mit 0, außer sie stehen auf der Packung. Natrium = Salz ÷ 2,5 (in mg). Antworte NUR mit JSON: {"name":"Produktname","brand":"Marke oder leer","servingGrams":0,"servingLabel":"Portionsangabe von der Packung oder leer","per100":{${NUTS.map(n => `"${n.k}":0`).join(',')}}}\nSchlüssel: ${keys}. ${UNITS.replace('Alle Werte gelten für die geschätzte Menge der jeweiligen Komponente (nicht pro 100 g). ', '')}`, img);
+    const per100 = {}; NUTS.forEach(n => per100[n.k] = Math.max(0, num(res?.per100?.[n.k])));
+    if (!(per100.kcal > 0) && !(per100.protein + per100.carbs + per100.fat > 0)) throw {code:'invalid_json'};
+    const p = {...S.product, name:(name || String(res.name || '') || 'Produkt ' + S.product.code).slice(0, 80), brand:String(res.brand || S.product.brand || '').slice(0, 40),
+      per100, serving:num(res.servingGrams) > 0 ? num(res.servingGrams) : null, servingLabel:String(res.servingLabel || '').slice(0, 40), img:S.product.img || img.thumb, hasNutri:true, source:'label'};
+    cacheProduct(p); S.product = p; S.portion = null; setSheet(productHTML()); toast('Produkt gespeichert – nächstes Mal sofort da');
+  } catch(e) { const m = aiError(e); busy.innerHTML = m ? `<p class="ai-note">${esc(m)}</p>` : ''; }
+}
+function packG(q){ const m = String(q || '').replace(',', '.').match(/([\d.]+)\s*(kg|g|ml|l)\b/i); if (!m) return 0; const v = parseFloat(m[1]); return /^(kg|l)$/i.test(m[2]) ? v * 1000 : v; }
+function portionGrams(){ const v = num($('#pr-g')?.value); return v > 0 ? v : (S.product.serving || 100); }
+function productTotals(gr){ const p = S.product.per100, f = gr / 100, o = {}; NUTS.forEach(n => o[n.k] = num(p[n.k]) * f); return o; }
+function productHTML(){
+  const p = S.product, gr = S.portion || p.serving || 100, t = productTotals(gr);
+  const quick = [...(p.serving ? [[p.serving, `1 Portion · ${fmt(p.serving)} g`]] : []), [100, '100 g'], ...(packG(p.qty) > 0 && packG(p.qty) !== 100 && packG(p.qty) !== p.serving ? [[packG(p.qty), `Ganze Packung · ${esc(p.qty)}`]] : [])];
+  return `${head('Produkt')}
+  <div class="prod">${p.img ? `<img src="${esc(p.img)}" alt="">` : `<span class="thumb">${esc((p.name || '?')[0].toUpperCase())}</span>`}<div><b>${esc(p.name)}</b><small>${esc([p.brand, p.qty].filter(Boolean).join(' · '))}</small><small class="muted">${fmt(p.per100.kcal)} kcal · P ${fmt(p.per100.protein, 1)} · KH ${fmt(p.per100.carbs, 1)} · F ${fmt(p.per100.fat, 1)} pro 100 g</small></div></div>
+  ${mealSeg(S.pendingMeal)}
+  <div class="field"><span class="flabel">Menge</span><div class="chips">${quick.map(([g, l]) => `<button class="chip ${Math.abs(g - gr) < 0.01 ? 'on' : ''}" data-action="pr-quick" data-g="${g}">${l}</button>`).join('')}</div></div>
+  <div class="grid2"><div class="field"><label for="pr-g">Gramm / ml</label><input type="number" id="pr-g" inputmode="decimal" step="any" value="${r1(gr)}"></div>${p.serving ? `<div class="field"><label for="pr-n">Portionen</label><input type="number" id="pr-n" inputmode="decimal" step="0.25" value="${r1(gr / p.serving)}"></div>` : ''}</div>
+  <div class="ed-total" id="pr-total">${totalHTML(t)}</div>
+  <div class="sheet-actions"><button class="btn" data-action="pr-edit">Anpassen</button><button class="primary" data-action="pr-add">Hinzufügen</button></div>
+  <p class="foot">Daten: Open Food Facts (ODbL)${p.source === 'label' ? ' · aus deinem Foto der Nährwerttabelle' : ''}</p>`;
+}
+function productEntry(){
+  const p = S.product, gr = portionGrams(), t = productTotals(gr), it = {name:p.brand && !p.name.includes(p.brand) ? `${p.name} (${p.brand})` : p.name, grams:r1(gr)};
+  NUTS.forEach(n => it[n.k] = r1(t[n.k]));
+  return {id:uid8(), meal:readMeal(), title:p.name, items:[it], thumb:p.img || null, source:'barcode', code:p.code, confidence:'', note:'', created:Date.now()};
+}
+function recentMealsHTML(){
+  const seen = new Set(), list = [];
+  Object.keys(S.days).sort().reverse().forEach(k => (S.days[k]?.entries || []).slice().reverse().forEach(e => { const key = (e.title || '').toLowerCase(); if (key && !seen.has(key) && list.length < 40) { seen.add(key); list.push({e, k}); } }));
+  return `${head('Schon gegessen')}${list.length ? `<div class="daylist">${list.map(({e, k}, i) => { const s = sumItems(e.items); return `<button class="dayrow" data-action="reuse" data-k="${k}" data-id="${esc(e.id)}"><span><b>${esc(e.title)}</b><small>${dayLabel(k)} · ${pmHTML(s)}</small></span><span></span><span class="kc num">${fmt(s.kcal)}</span></button>`; }).join('')}</div>` : '<p class="muted">Noch keine Mahlzeiten gespeichert.</p>'}`;
+}
+
 const busyHTML = msg => `<div class="busy"><div class="spin"></div><div class="grow"><b>${msg}</b><br><small class="muted">Das dauert meist 5–20 Sekunden.</small></div><button class="btn" data-action="stop">Stopp</button></div>`;
 const lock = on => document.querySelectorAll('#sheet-body .sheet-actions button, #sheet-body .fix button, #sheet-body .add-item button').forEach(b => b.disabled = on);
 
@@ -480,6 +691,26 @@ const H = {
   range: a => { S.range = +a.dataset.n; render(); },
   'open-add': () => { aiCtl?.abort(); S.draftImg = null; const html = addMenuHTML(); $('#sheet-body') ? setSheet(html) : openSheet(html); },
   'close-sheet': closeSheet,
+  scan: () => startScan(),
+  'bc-manual': () => { const c = ($('#bc-code')?.value || '').replace(/\D/g, ''); if (!/^\d{8,14}$/.test(c)) { toast('Gib die 8- oder 13-stellige Nummer unter dem Barcode ein.'); return; } onBarcode(c); },
+  'bc-retry': a => onBarcode(a.dataset.code),
+  'open-product': a => { const p = productCache()[a.dataset.code]; if (!p) return; S.pendingMeal = readMeal(); S.product = p; S.portion = null; cacheProduct(p); setSheet(productHTML()); },
+  'pr-quick': a => { S.pendingMeal = readMeal(); S.portion = num(a.dataset.g); setSheet(productHTML()); },
+  'pr-add': () => {
+    const e = productEntry(), k = S.date, day = S.days[k] || (S.days[k] = {date:k, entries:[]});
+    day.entries.push(e); cacheProduct(S.product); closeSheet(); saveDay(k); render(); toast(`${e.title} hinzugefügt · ${fmt(e.items[0].kcal)} kcal`);
+  },
+  'pr-edit': () => { const e = productEntry(); S.draft = {...e, isNew:true, date:S.date}; setSheet(editorHTML()); },
+  'nf-manual': () => {
+    const name = $('#nf-name')?.value.trim() || ''; const it = {name:name || 'Produkt'}; NUTS.forEach(n => it[n.k] = 0); it.grams = 100;
+    S.draft = {id:uid8(), isNew:true, date:S.date, meal:S.pendingMeal, title:name, items:[it], thumb:S.product?.img || null, source:'barcode', code:S.product?.code};
+    setSheet(editorHTML()); toast('Trag die Werte pro 100 g ein und dann die gegessene Menge');
+  },
+  'recent-meals': () => { S.pendingMeal = readMeal(); setSheet(recentMealsHTML()); },
+  reuse: a => {
+    const e = (S.days[a.dataset.k]?.entries || []).find(x => x.id === a.dataset.id); if (!e) return;
+    S.draft = {...clone(e), id:uid8(), isNew:true, date:S.date, meal:S.pendingMeal, created:Date.now()}; delete S.draft.origDate; setSheet(editorHTML());
+  },
   stop: () => aiCtl?.abort(),
   'add-text': () => { S.pendingMeal = readMeal(); setSheet(`${head('Mahlzeit beschreiben')}<div class="field"><label for="tx-text">Was hast du gegessen?</label><textarea id="tx-text" rows="4" placeholder="z. B. Gyros mit Tzatziki und Pommes, dazu ein Cola Zero 0,5 l"></textarea></div><div id="tx-busy"></div><div class="sheet-actions"><button class="btn" data-action="open-add">Zurück</button><button class="primary" data-action="run-text">Nährwerte schätzen</button></div>`); setTimeout(() => $('#tx-text')?.focus(), 50); },
   'run-text': () => runAnalysis('text'),
@@ -506,6 +737,7 @@ const H = {
     d.items.forEach(it => { if (!String(it.name).trim()) it.name = 'Zutat'; NUTS.forEach(n => it[n.k] = r1(num(it[n.k]))); it.grams = r1(num(it.grams)); });
     if (!String(d.title).trim()) d.title = d.items.map(i => i.name).join(', ').slice(0, 80);
     const entry = {id:d.id, meal:d.meal, title:String(d.title).trim(), items:d.items, thumb:d.thumb || null, source:d.source || 'manual', confidence:d.confidence || '', note:d.note || '', created:d.created || Date.now()};
+    if (d.code) { entry.code = d.code; const it = d.items[0]; if (d.items.length === 1 && it.grams > 0 && it.kcal > 0) { const per100 = {}; NUTS.forEach(n => per100[n.k] = Math.round(num(it[n.k]) / it.grams * 10000) / 100); const old = productCache()[d.code] || {}; cacheProduct({...old, code:d.code, name:entry.title, brand:old.brand || '', img:old.img || d.thumb || null, per100, serving:old.serving || null, servingLabel:old.servingLabel || '', hasNutri:true, source:old.source || 'manual'}); } }
     const touched = new Set([d.date]);
     if (d.origDate && d.origDate !== d.date) { const od = S.days[d.origDate]; if (od) { od.entries = od.entries.filter(e => e.id !== d.id); touched.add(d.origDate); } }
     const day = S.days[d.date] || (S.days[d.date] = {date:d.date, entries:[]});
@@ -546,6 +778,8 @@ document.addEventListener('click', e => {
 });
 document.addEventListener('change', e => {
   const t = e.target;
+  if (t.id === 'bc-file') { const f = t.files?.[0]; t.value = ''; scanFile(f); return; }
+  if (t.id === 'nf-file') { const f = t.files?.[0]; t.value = ''; readLabel(f); return; }
   if (t.id === 'f-cam' || t.id === 'f-gal') { const f = t.files?.[0]; t.value = ''; onPhoto(f); return; }
   if (t.id === 'dpick' && t.value) { S.date = t.value > todayKey() ? todayKey() : t.value; render(); return; }
   if (t.name === 'p-theme') { const v = t.value; if (v === 'system') { delete document.documentElement.dataset.theme; lsSet(K_THEME, null); } else { document.documentElement.dataset.theme = v; lsSet(K_THEME, v); } return; }
@@ -554,6 +788,14 @@ document.addEventListener('change', e => {
 document.addEventListener('input', e => {
   const t = e.target;
   if (t.closest('#pform')) { updateProfileResults(); return; }
+  if ((t.id === 'pr-g' || t.id === 'pr-n') && S.product) {
+    let g = num($('#pr-g').value);
+    if (t.id === 'pr-n') { g = num(t.value) * (S.product.serving || 100); $('#pr-g').value = r1(g); }
+    else if ($('#pr-n')) $('#pr-n').value = r1(g / (S.product.serving || 100));
+    S.portion = g > 0 ? g : null; $('#pr-total').innerHTML = totalHTML(productTotals(g > 0 ? g : 0));
+    document.querySelectorAll('#sheet-body .chip[data-g]').forEach(c => c.classList.toggle('on', Math.abs(num(c.dataset.g) - g) < 0.01));
+    return;
+  }
   if (S.draft && t.dataset.f) {
     const it = S.draft.items[+t.dataset.i]; if (!it) return; const f = t.dataset.f;
     if (f === 'name') { it.name = t.value; return; }
@@ -566,7 +808,7 @@ document.addEventListener('input', e => {
   }
 });
 document.addEventListener('focusout', e => { if (e.target.dataset?.f === 'grams') gBase = null; });
-document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('#scrim')) closeSheet(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('#scrim')) closeSheet(); if (e.key === 'Enter' && e.target.id === 'bc-code') { e.preventDefault(); H['bc-manual'](); } });
 $('#btn-google').addEventListener('click', () => { $('#login-err').hidden = true; signInGoogle(); });
 $('#btn-local').addEventListener('click', () => { lsSet(K_MODE, 'local'); startLocal(); });
 window.matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', () => render());
