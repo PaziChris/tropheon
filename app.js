@@ -1,0 +1,577 @@
+// TROPHEON · Ancient Roots. Modern Nutrition.
+// Statische Web-App (kein Build nötig). Firebase: Auth (Google), Firestore (Daten), AI Logic (Gemini, Fotoanalyse).
+import CONFIG from './firebase-config.js';
+
+const FB_VERSION = '12.19.0';
+const FB = `https://www.gstatic.com/firebasejs/${FB_VERSION}/`;
+const configured = !!CONFIG?.firebase?.apiKey && !/^DEIN/.test(CONFIG.firebase.apiKey);
+
+/* ───────── Konstanten ───────── */
+const NUTS = [
+  {k:'kcal',l:'Kalorien',u:'kcal',main:1},
+  {k:'protein',l:'Protein',u:'g',main:1},
+  {k:'carbs',l:'Kohlenhydrate',u:'g',main:1},
+  {k:'fat',l:'Fett',u:'g',main:1},
+  {k:'fiber',l:'Ballaststoffe',u:'g'},
+  {k:'sugar',l:'Zucker',u:'g',limit:1},
+  {k:'satfat',l:'Gesättigte Fettsäuren',u:'g',limit:1},
+  {k:'vitA',l:'Vitamin A',u:'µg'},
+  {k:'vitB12',l:'Vitamin B12',u:'µg'},
+  {k:'vitC',l:'Vitamin C',u:'mg'},
+  {k:'vitD',l:'Vitamin D',u:'µg'},
+  {k:'vitE',l:'Vitamin E',u:'mg'},
+  {k:'folate',l:'Folat',u:'µg'},
+  {k:'calcium',l:'Calcium',u:'mg'},
+  {k:'iron',l:'Eisen',u:'mg'},
+  {k:'magnesium',l:'Magnesium',u:'mg'},
+  {k:'potassium',l:'Kalium',u:'mg'},
+  {k:'sodium',l:'Natrium',u:'mg',limit:1},
+];
+// Die Mahlzeiten der alten Griechen: Akratisma (Frühstück), Ariston (Mittag), Hesperisma (Nachmittag), Deipnon (Abend)
+const MEALS = [
+  {k:'breakfast',l:'Frühstück',s:'Frühstück',g:'ΑΚΡΑΤΙΣΜΑ'},
+  {k:'lunch',l:'Mittagessen',s:'Mittag',g:'ΑΡΙΣΤΟΝ'},
+  {k:'dinner',l:'Abendessen',s:'Abend',g:'ΔΕΙΠΝΟΝ'},
+  {k:'snack',l:'Snacks',s:'Snack',g:'ΕΣΠΕΡΙΣΜΑ'},
+];
+const ACT = {
+  sit:{f:1.2,l:'Sitzend – kaum Bewegung'},
+  light:{f:1.375,l:'Leicht aktiv – 1–3× Sport pro Woche'},
+  mod:{f:1.55,l:'Mäßig aktiv – 3–5× Sport pro Woche'},
+  high:{f:1.725,l:'Sehr aktiv – 6–7× Sport pro Woche'},
+  ext:{f:1.9,l:'Extrem aktiv – körperliche Arbeit + Sport'},
+};
+const K_LOCAL='tropheon.local', K_MODE='tropheon.mode', K_THEME='tropheon.theme';
+
+/* ───────── Helfer ───────── */
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const num = v => { const n = Number(String(v ?? '').replace(',', '.')); return isFinite(n) ? n : 0; };
+const r1 = n => Math.round(n * 10) / 10;
+const fmt = (n, d = 0) => (+n || 0).toLocaleString('de-AT', {minimumFractionDigits:d, maximumFractionDigits:d}).replace('-', '−');
+const sgn = (n, d = 0) => (n > 0 ? '+' : '') + fmt(n, d);
+const pad = n => String(n).padStart(2, '0');
+const key = d => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+const fromKey = k => { const [y,m,d] = k.split('-').map(Number); return new Date(y, m-1, d); };
+const todayKey = () => key(new Date());
+const addDays = (k, n) => { const d = fromKey(k); d.setDate(d.getDate() + n); return key(d); };
+const uid8 = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+const clone = o => JSON.parse(JSON.stringify(o));
+const lsGet = k => { try { return localStorage.getItem(k); } catch(e) { return null; } };
+const lsSet = (k, v) => { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch(e) {} };
+function dayLabel(k){ const t = todayKey(); if (k === t) return 'Heute'; if (k === addDays(t,-1)) return 'Gestern'; return fromKey(k).toLocaleDateString('de-AT',{weekday:'long'}); }
+const dateLong = k => fromKey(k).toLocaleDateString('de-AT',{day:'numeric',month:'long',year:'numeric'});
+function defaultMeal(){ const h = new Date().getHours(); return h < 10.5 ? 'breakfast' : h < 15 ? 'lunch' : h < 17 ? 'snack' : h < 22 ? 'dinner' : 'snack'; }
+function toast(msg){ const t = $('#toast'); t.textContent = msg; t.hidden = false; clearTimeout(toast._t); toast._t = setTimeout(() => t.hidden = true, 2800); }
+
+/* ───────── Zustand ───────── */
+const S = { profile:null, days:{}, view:'today', date:todayKey(), range:7, mode:'boot', user:null,
+  draft:null, draftImg:null, pendingMeal:defaultMeal(), ai:'off' };
+let cacheKey = K_LOCAL;
+function loadCache(){ try { const o = JSON.parse(lsGet(cacheKey) || 'null'); S.profile = o?.profile || null; S.days = o?.days || {}; } catch(e) { S.profile = null; S.days = {}; } }
+function saveCache(){ lsSet(cacheKey, JSON.stringify({profile:S.profile, days:S.days})); }
+
+/* ───────── Ernährungs-Mathematik ───────── */
+function sumItems(items){ const t = {}; NUTS.forEach(n => t[n.k] = 0); (items||[]).forEach(it => NUTS.forEach(n => t[n.k] += num(it[n.k]))); return t; }
+function sumEntries(es){ const t = {}; NUTS.forEach(n => t[n.k] = 0); (es||[]).forEach(e => { const s = sumItems(e.items); NUTS.forEach(n => t[n.k] += s[n.k]); }); return t; }
+function calc(p){
+  if (!p || !(p.weight > 0) || !(p.height > 0) || !(p.age > 0) || !p.sex) return null;
+  const h = p.height / 100, bmi = p.weight / (h*h);
+  const bmr = 10*p.weight + 6.25*p.height - 5*p.age + (p.sex === 'm' ? 5 : -161);   // Mifflin-St Jeor
+  const tdee = bmr * (ACT[p.activity] || ACT.light).f;
+  const rate = num(p.rate) || 0.5;
+  const delta = p.goal === 'lose' ? -rate*7700/7 : p.goal === 'gain' ? rate*7700/7 : 0;   // 7700 kcal ≈ 1 kg Körperfett
+  let target = tdee + delta, warn = '';
+  const floor = p.sex === 'm' ? 1500 : 1200;
+  if (p.goal === 'lose' && target < floor) { target = floor; warn = `Dein Tagesziel wurde auf ${fmt(floor)} kcal angehoben – weniger ist ohne ärztliche Begleitung nicht empfehlenswert. Wähle ein langsameres Tempo.`; }
+  else if (p.goal === 'lose' && -delta > tdee*0.25) warn = 'Das gewählte Tempo bedeutet ein großes Defizit (über 25 % deines Bedarfs). Langsamer ist meist nachhaltiger und schont die Muskeln.';
+  if (p.goal === 'lose' && bmi < 18.5) warn = 'Dein BMI liegt im Untergewicht. Abnehmen wird nicht empfohlen – sprich bitte mit einer Ärztin oder einem Arzt.';
+  const refW = bmi > 30 ? 25*h*h : p.weight;
+  const protein = refW * (p.goal === 'keep' ? 1.4 : 1.8);
+  const fat = target * 0.3 / 9;
+  const carbs = Math.max(0, (target - protein*4 - fat*9) / 4);
+  let eta = null;
+  if (p.targetWeight > 0 && p.goal !== 'keep') {
+    const diff = p.weight - p.targetWeight;
+    if ((p.goal === 'lose' && diff > 0) || (p.goal === 'gain' && diff < 0)) {
+      const weeks = Math.abs(diff) / rate, d = new Date(); d.setDate(d.getDate() + Math.round(weeks*7)); eta = {weeks, date:d};
+    }
+  }
+  return {bmi, bmr, tdee, delta:target - tdee, target, protein, fat, carbs, warn, healthy:[18.5*h*h, 24.9*h*h], eta};
+}
+const bmiCat = b => b < 18.5 ? 'Untergewicht' : b < 25 ? 'Normalgewicht' : b < 30 ? 'Übergewicht' : b < 35 ? 'Adipositas Grad I' : b < 40 ? 'Adipositas Grad II' : 'Adipositas Grad III';
+function refs(p, c){ // D-A-CH-Referenzwerte für Erwachsene
+  const f = p?.sex === 'f', age = p?.age || 30, kcal = c?.target || 2000;
+  return {kcal, protein:c?.protein||60, carbs:c?.carbs||250, fat:c?.fat||70, fiber:30, sugar:kcal*0.1/4, satfat:kcal*0.1/9,
+    vitA:f?700:850, vitB12:4, vitC:f?95:110, vitD:20, vitE:f?12:14, folate:300, calcium:1000, iron:f?(age<51?16:14):11,
+    magnesium:f?300:350, potassium:4000, sodium:1500};
+}
+
+/* ───────── Firebase ───────── */
+let fb = null, unsubs = [];
+async function initFirebase(){
+  const [appM, authM, fsM] = await Promise.all([
+    import(FB + 'firebase-app.js'), import(FB + 'firebase-auth.js'), import(FB + 'firebase-firestore.js')]);
+  const app = appM.initializeApp(CONFIG.firebase);
+  if (CONFIG.recaptchaSiteKey) {
+    try {
+      const ac = await import(FB + 'firebase-app-check.js');
+      if (['localhost','127.0.0.1'].includes(location.hostname)) self.FIREBASE_APPCHECK_DEBUG_TOKEN = true;
+      ac.initializeAppCheck(app, {provider:new ac.ReCaptchaV3Provider(CONFIG.recaptchaSiteKey), isTokenAutoRefreshEnabled:true});
+    } catch(e) { console.warn('App Check', e); }
+  }
+  const auth = authM.getAuth(app);
+  auth.languageCode = 'de';
+  let db;
+  try { db = fsM.initializeFirestore(app, {localCache: fsM.persistentLocalCache({tabManager: fsM.persistentMultipleTabManager()})}); }
+  catch(e) { db = fsM.getFirestore(app); }
+  let model = null;
+  try {
+    const aiM = await import(FB + 'firebase-ai.js');
+    const ai = aiM.getAI(app, {backend: new aiM.GoogleAIBackend()});
+    model = aiM.getGenerativeModel(ai, {model: CONFIG.geminiModel || 'gemini-3.5-flash',
+      generationConfig: {responseMimeType:'application/json', temperature:0.2}});
+  } catch(e) { console.warn('AI Logic', e); }
+  fb = {app, auth, db, authM, fsM, model};
+  S.ai = model ? 'on' : 'off';
+  authM.getRedirectResult(auth).catch(e => showLoginError(e));
+  authM.onAuthStateChanged(auth, u => {
+    if (u) startCloud(u);
+    else if (lsGet(K_MODE) === 'local') startLocal();
+    else showLogin();
+  });
+}
+function showLogin(){ S.mode = 'login'; $('#login').hidden = false; $('#app').hidden = true; $('#tabs').hidden = true; $('#fab').hidden = true; }
+function hideLogin(){ $('#login').hidden = true; $('#app').hidden = false; $('#tabs').hidden = false; }
+function showLoginError(e){
+  const el = $('#login-err'); if (!el || !e) return;
+  const c = e.code || '';
+  if (c === 'auth/popup-closed-by-user' || c === 'auth/cancelled-popup-request') return;
+  el.textContent = c === 'auth/unauthorized-domain' ? 'Diese Domain ist in Firebase nicht freigegeben (Authentication → Einstellungen → Autorisierte Domains).'
+    : c === 'auth/operation-not-allowed' ? 'Google-Anmeldung ist in Firebase noch nicht aktiviert (README Schritt 3).'
+    : 'Anmeldung fehlgeschlagen. Bitte nochmal versuchen.';
+  el.hidden = false;
+}
+async function signInGoogle(){
+  const {authM, auth} = fb; const provider = new authM.GoogleAuthProvider();
+  try { await authM.signInWithPopup(auth, provider); }
+  catch(e) {
+    if (['auth/popup-blocked','auth/operation-not-supported-in-this-environment'].includes(e.code)) await authM.signInWithRedirect(auth, provider);
+    else showLoginError(e);
+  }
+}
+function stopListeners(){ unsubs.forEach(u => { try { u(); } catch(e) {} }); unsubs = []; }
+
+function startLocal(){
+  stopListeners(); S.mode = 'local'; S.user = null; cacheKey = K_LOCAL; loadCache(); hideLogin(); render();
+}
+function startCloud(user){
+  stopListeners(); S.mode = 'cloud'; S.user = user; cacheKey = 'tropheon.cache.' + user.uid; loadCache(); hideLogin(); render();
+  const {db, fsM} = fb;
+  const profRef = fsM.doc(db, 'users', user.uid), daysRef = fsM.collection(db, 'users', user.uid, 'days');
+  const migrateKey = 'tropheon.migrated.' + user.uid;
+  unsubs.push(fsM.onSnapshot(profRef, s => {
+    if (s.exists()) { S.profile = s.data(); saveCache(); softRender(); return; }
+    if (s.metadata.fromCache) return;
+    const local = JSON.parse(lsGet(K_LOCAL) || 'null');
+    const p = S.profile || local?.profile;
+    if (p) { S.profile = p; fsM.setDoc(profRef, clone(p)).catch(() => {}); softRender(); }
+  }, e => console.warn(e)));
+  unsubs.push(fsM.onSnapshot(daysRef, qs => {
+    if (qs.empty && qs.metadata.fromCache) return;
+    if (qs.empty && !lsGet(migrateKey)) {
+      lsSet(migrateKey, '1');
+      const local = JSON.parse(lsGet(K_LOCAL) || 'null')?.days || {};
+      const all = {...local, ...S.days};
+      Object.entries(all).forEach(([k, d]) => { if (d?.entries?.length) fsM.setDoc(fsM.doc(daysRef, k), {date:k, entries:d.entries, updated:Date.now()}).catch(() => {}); });
+      if (Object.keys(all).length) return;
+    }
+    lsSet(migrateKey, '1');
+    const m = {}; qs.forEach(d => { m[d.id] = d.data(); }); S.days = m; saveCache(); softRender();
+  }, e => console.warn(e)));
+}
+function saveDay(k){
+  const d = S.days[k];
+  if (d && !d.entries?.length) delete S.days[k];
+  saveCache();
+  if (S.mode !== 'cloud') return;
+  const {db, fsM} = fb, ref = fsM.doc(db, 'users', S.user.uid, 'days', k);
+  const p = S.days[k] ? fsM.setDoc(ref, {date:k, entries:clone(S.days[k].entries), updated:Date.now()}) : fsM.deleteDoc(ref);
+  p.catch(() => toast('Speichern in der Cloud fehlgeschlagen – auf dem Gerät gesichert.'));
+}
+function saveProfile(){
+  saveCache();
+  if (S.mode !== 'cloud') return;
+  const {db, fsM} = fb;
+  fsM.setDoc(fsM.doc(db, 'users', S.user.uid), clone(S.profile)).catch(() => toast('Profil konnte nicht in der Cloud gespeichert werden.'));
+}
+async function signOutNow(){ stopListeners(); lsSet(K_MODE, null); try { await fb.authM.signOut(fb.auth); } catch(e) {} location.reload(); }
+
+/* ───────── KI (Gemini über Firebase AI Logic) ───────── */
+const SCHEMA = '{"title":"kurzer Name der Mahlzeit","items":[{"name":"Komponente","grams":0,"kcal":0,"protein":0,"carbs":0,"fat":0,"fiber":0,"sugar":0,"satfat":0,"vitA":0,"vitB12":0,"vitC":0,"vitD":0,"vitE":0,"folate":0,"calcium":0,"iron":0,"magnesium":0,"potassium":0,"sodium":0}],"confidence":"hoch|mittel|niedrig","note":"ein kurzer Satz zu Unsicherheiten"}';
+const UNITS = 'Einheiten: grams in g; kcal in kcal; protein, carbs, fat, fiber, sugar, satfat in g; vitA in µg RAE; vitB12 in µg; vitC in mg; vitD in µg; vitE in mg; folate in µg; calcium, iron, magnesium, potassium, sodium in mg. Alle Werte gelten für die geschätzte Menge der jeweiligen Komponente (nicht pro 100 g). Nur Zahlen, keine Einheiten in den Werten.';
+const EXPERT = 'Du bist erfahrene Ernährungswissenschaftlerin. Gib realistische Werte nach Standard-Nährwertdatenbanken (BLS, USDA) an. Komponentennamen auf Deutsch.';
+function normItems(arr){ return (Array.isArray(arr) ? arr : []).map(it => { const o = {name:String(it?.name || 'Zutat').slice(0,80)}; NUTS.forEach(n => o[n.k] = r1(Math.max(0, num(it?.[n.k])))); o.grams = r1(Math.max(0, num(it?.grams))); return o; }); }
+function parseJSON(t){
+  try { return JSON.parse(t); } catch(e) {}
+  const f = t.match(/```(?:json)?\s*([\s\S]*?)```/); if (f) { try { return JSON.parse(f[1]); } catch(e) {} }
+  const a = t.indexOf('{'), b = t.lastIndexOf('}'); if (a >= 0 && b > a) { try { return JSON.parse(t.slice(a, b+1)); } catch(e) {} }
+  throw {code:'invalid_json'};
+}
+let aiCtl = null;
+async function ask(prompt, img){
+  if (!fb?.model) throw {code:'off'};
+  aiCtl = new AbortController(); const sig = aiCtl.signal;
+  const parts = [{text:prompt}]; if (img) parts.push({inlineData:{data:img.b64, mimeType:img.mime}});
+  const res = await new Promise((ok, fail) => {
+    sig.addEventListener('abort', () => fail({code:'cancelled'}));
+    fb.model.generateContent(parts).then(ok, fail);
+  });
+  return parseJSON(res.response.text());
+}
+function aiError(e){
+  const c = e?.code, m = String(e?.message || e || '');
+  if (c === 'cancelled') return null;
+  if (c === 'off') return configured ? 'Die KI ist nicht erreichbar. Prüfe Firebase AI Logic (README Schritt 5).' : 'Die Foto-Analyse braucht ein verbundenes Firebase-Projekt (siehe README). Du kannst manuell eintragen.';
+  if (c === 'invalid_json') return 'Die Antwort war unvollständig. Bitte nochmal versuchen.';
+  if (/app.?check/i.test(m)) return 'App Check blockiert die Anfrage. Richte reCAPTCHA ein (README Schritt 6).';
+  if (/quota|429|RESOURCE_EXHAUSTED|rate/i.test(m)) return 'Das KI-Kontingent ist gerade erschöpft. Warte kurz und versuch es nochmal.';
+  if (/SAFETY|blocked|RECITATION/i.test(m)) return 'Zu diesem Bild konnte keine Schätzung erstellt werden. Versuch ein anderes Foto.';
+  if (/API key|api-not-enabled|PERMISSION_DENIED|403|not enabled/i.test(m)) return 'Firebase AI Logic ist noch nicht aktiviert (README Schritt 5).';
+  if (/not found|404|model/i.test(m)) return 'Das KI-Modell wurde nicht gefunden. Prüfe „geminiModel“ in firebase-config.js.';
+  return 'Verbindungsproblem. Bitte nochmal versuchen.';
+}
+function loadImage(file){ return new Promise((ok, fail) => { const url = URL.createObjectURL(file), img = new Image(); img.onload = () => ok({img, url}); img.onerror = () => { URL.revokeObjectURL(url); fail(new Error('decode')); }; img.src = url; }); }
+async function prepImage(file){
+  const {img, url} = await loadImage(file);
+  const max = 1280, sc = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+  const c = document.createElement('canvas'); c.width = Math.round(img.naturalWidth*sc); c.height = Math.round(img.naturalHeight*sc);
+  c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+  const b64 = c.toDataURL('image/jpeg', 0.85).split(',')[1];
+  const s = 150, t = document.createElement('canvas'); t.width = s; t.height = s;
+  const r = Math.max(s/img.naturalWidth, s/img.naturalHeight);
+  t.getContext('2d').drawImage(img, (s - img.naturalWidth*r)/2, (s - img.naturalHeight*r)/2, img.naturalWidth*r, img.naturalHeight*r);
+  URL.revokeObjectURL(url);
+  return {b64, mime:'image/jpeg', thumb:t.toDataURL('image/jpeg', 0.7)};
+}
+
+/* ───────── Rendering ───────── */
+function render(){
+  if (S.mode === 'boot' || S.mode === 'login') return;
+  document.querySelectorAll('.tab').forEach(t => t.dataset.view === S.view ? t.setAttribute('aria-current','page') : t.removeAttribute('aria-current'));
+  $('#fab').hidden = S.view === 'profile';
+  $('#app').innerHTML = topHTML() + (S.view === 'today' ? todayHTML() : S.view === 'history' ? historyHTML() : profileHTML());
+  if (S.view === 'profile') updateProfileResults();
+}
+function softRender(){ if (S.view === 'profile') { const el = $('#store-chip'); if (el) el.innerHTML = storeText(); return; } render(); }
+function storeText(){ return S.mode === 'cloud' ? 'Cloud ✓<br>' + esc(S.user?.displayName?.split(' ')[0] || '') : 'nur dieses<br>Gerät'; }
+function topHTML(){ return `<div class="top"><div class="brand"><svg viewBox="0 0 120 120" aria-hidden="true"><use href="#amphora"/></svg><span><b>TROPHEON</b><small>Ancient Roots. Modern Nutrition.</small></span></div><span class="store-chip" id="store-chip">${storeText()}</span></div><div class="meander" aria-hidden="true"></div>`; }
+
+function wreathRing(pct, over){
+  const C0 = 80, R = 54, C = 2*Math.PI*R, p = Math.max(0, Math.min(1, pct));
+  let leaves = '';
+  for (const side of [-1, 1]) for (let i = 0; i < 10; i++) {
+    const deg = 90 + side*(18 + i*13.5), a = deg*Math.PI/180, rr = i % 2 ? 66 : 71;
+    const x = C0 + rr*Math.cos(a), y = C0 + rr*Math.sin(a), rot = deg + 90 + side*(-35);
+    leaves += `<ellipse class="leaf" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" rx="7.5" ry="3" transform="rotate(${rot.toFixed(1)} ${x.toFixed(1)} ${y.toFixed(1)})"/>`;
+  }
+  return `<svg viewBox="0 0 160 160" class="ring" aria-hidden="true">${leaves}<circle cx="${C0}" cy="${C0}" r="${R}" class="ring-bg"/><circle cx="${C0}" cy="${C0}" r="${R}" class="ring-fg ${over?'over':''}" stroke-dasharray="${C.toFixed(1)}" stroke-dashoffset="${(C*(1-p)).toFixed(1)}" transform="rotate(-90 ${C0} ${C0})"/></svg>`;
+}
+function column(lbl, val, tgt, cls){
+  const p = tgt ? val/tgt : 0;
+  return `<div class="col ${cls}"><div class="col-cap"></div><div class="col-echinus"></div><div class="col-shaft"><div class="col-fill ${p>1.1?'over':''}" style="height:${Math.min(100,p*100)}%"></div></div><div class="col-base"></div><div class="col-plinth"></div><b class="num">${fmt(val)}<small> / ${fmt(tgt)} g</small></b><span>${lbl}</span></div>`;
+}
+const pmHTML = t => `<span class="pm"><i class="P">P ${fmt(t.protein)}</i><i class="K">KH ${fmt(t.carbs)}</i><i class="F">F ${fmt(t.fat)}</i></span>`;
+
+function todayHTML(){
+  const k = S.date, t = todayKey(), entries = S.days[k]?.entries || [], tot = sumEntries(entries), c = calc(S.profile), R = refs(S.profile, c);
+  let h = `<div class="daynav"><button data-action="prev-day" aria-label="Vorheriger Tag">‹</button><label class="datepick">${dayLabel(k)}<small>${dateLong(k)}</small><input type="date" id="dpick" value="${k}" max="${t}" aria-label="Tag auswählen"></label><button data-action="next-day" aria-label="Nächster Tag" ${k >= t ? 'disabled' : ''}>›</button></div>`;
+  if (c) {
+    const rem = c.target - tot.kcal, over = rem < 0, bal = tot.kcal - c.tdee, gain = S.profile.goal === 'gain';
+    const gl = S.profile.goal === 'lose' ? `Abnehmen · ${fmt(c.delta)} kcal/Tag` : gain ? `Zunehmen · ${sgn(c.delta)} kcal/Tag` : 'Gewicht halten';
+    h += `<section class="panel"><div class="summary"><div class="ringwrap">${wreathRing(tot.kcal/c.target, over)}<div class="ring-center"><b class="num">${fmt(Math.abs(rem))}</b><span>${over ? 'kcal drüber' : 'kcal übrig'}</span></div></div>
+      <div class="stats"><div class="stat"><span>Tagesziel</span><b>${fmt(c.target)} kcal</b></div><div class="stat"><span>Gegessen</span><b>${fmt(tot.kcal)} kcal</b></div><div class="stat"><span>Verbrauch</span><b>${fmt(c.tdee)} kcal</b></div><div class="stat"><span>${bal <= 0 ? 'Defizit' : 'Überschuss'}</span><b class="${(gain ? bal >= 0 : bal <= 0) ? 'pos' : 'neg'}">${sgn(bal)} kcal</b></div><span class="goalchip">${gl}</span></div></div>
+      <div class="colonnade">${column('Protein', tot.protein, R.protein, 'protein')}${column('Kohlenh.', tot.carbs, R.carbs, 'carbs')}${column('Fett', tot.fat, R.fat, 'fat')}</div></section>`;
+  } else {
+    h += `<section class="panel"><span class="eyebrow">Γνῶθι σεαυτόν · Erkenne dich selbst</span><h2 style="margin-top:6px">Erst dein Ziel festlegen</h2><p class="muted" style="margin:6px 0 12px">Mit Alter, Größe, Gewicht und Aktivität berechne ich deinen Kalorienbedarf, dein Defizit zum Abnehmen oder den Überschuss zum Zunehmen.</p><button class="primary" data-action="tab" data-view="profile">Profil einrichten</button>${entries.length ? `<hr class="hair"><div class="stat"><span>Gegessen</span><b>${fmt(tot.kcal)} kcal</b></div>` : ''}</section>`;
+  }
+  if (!entries.length) {
+    h += `<div class="empty"><svg viewBox="0 0 120 120" aria-hidden="true"><use href="#amphora"/></svg><b>Die Amphore ist leer</b><span>Fotografiere deinen Teller – ich erkenne die Speisen und schätze Kalorien, Protein und Vitamine. Du kannst alles nachträglich korrigieren.</span><button class="primary" data-action="open-add">Erste Mahlzeit erfassen</button></div>`;
+  } else {
+    MEALS.forEach(m => {
+      const es = entries.filter(e => e.meal === m.k); if (!es.length) return; const mt = sumEntries(es);
+      h += `<section class="meal-group"><div class="meal-head"><h3>${m.l}<small>${m.g}</small></h3><span>${fmt(mt.kcal)} kcal</span></div>${es.map(e => { const s = sumItems(e.items); return `<button class="entry" data-action="edit" data-id="${esc(e.id)}">${e.thumb ? `<img class="thumb" src="${e.thumb}" alt="">` : `<span class="thumb">${esc((e.title || '?').trim()[0]?.toUpperCase() || '?')}</span>`}<span class="t"><b>${esc(e.title)}</b><small>${pmHTML(s)}</small></span><span class="k num">${fmt(s.kcal)}<small>kcal</small></span></button>`; }).join('')}</section>`;
+    });
+    h += `<section class="panel"><h2>Nährstoffe des Tages</h2><hr class="rule"><div class="label-table">${NUTS.filter(n => !n.main).map(n => { const v = tot[n.k], r = R[n.k], p = r ? v/r : 0; const cls = n.limit ? (p > 1 ? 'badf' : '') : (p >= 1 ? 'done' : ''); const col = n.limit && p > 1 ? 'var(--bad)' : !n.limit && p >= 1 ? 'var(--good)' : 'inherit'; return `<div class="lt-row ${n.limit ? 'limit' : ''}"><span class="lbl">${n.l}</span><span class="v"><b>${fmt(v, v < 10 && v > 0 ? 1 : 0)}</b> / ${fmt(r, r < 10 ? 1 : 0)} ${n.u}</span><span class="p num" style="color:${col}">${fmt(p*100)}%</span><div class="mini"><i class="${cls}" style="width:${Math.min(100, p*100)}%"></i></div></div>`; }).join('')}</div><p class="foot">Schätzwerte aus der Bildanalyse. Referenz: D-A-CH-Empfehlungen für Erwachsene; „max.“ markiert Obergrenzen.</p></section>`;
+  }
+  return h;
+}
+
+function historyHTML(){
+  const n = S.range, t = todayKey(), keys = []; for (let i = n-1; i >= 0; i--) keys.push(addDays(t, -i));
+  const c = calc(S.profile), vals = keys.map(k => sumEntries(S.days[k]?.entries));
+  const logged = keys.map((k, i) => ({k, v:vals[i]})).filter(x => x.v.kcal > 0);
+  const avg = a => logged.length ? logged.reduce((s, x) => s + x.v[a], 0) / logged.length : 0;
+  const bal = c ? logged.reduce((s, x) => s + (x.v.kcal - c.tdee), 0) : 0, gain = S.profile?.goal === 'gain';
+  const good = gain ? bal >= 0 : bal <= 0;
+  let h = `<div class="hist-top"><h2 class="sec-title">Verlauf</h2><div class="seg" role="radiogroup" aria-label="Zeitraum">${[7,14,30].map(x => `<label><input type="radio" name="rng" data-action="range" data-n="${x}" ${x === n ? 'checked' : ''}><span>${x} Tage</span></label>`).join('')}</div></div>`;
+  h += `<div class="kpis"><div class="kpi"><small>Ø Kalorien</small><b class="num">${fmt(avg('kcal'))}</b><span>${c ? `Ziel ${fmt(c.target)} kcal` : 'pro erfasstem Tag'}</span></div><div class="kpi"><small>Ø Protein</small><b class="num">${fmt(avg('protein'))} g</b><span>${c ? `Ziel ${fmt(c.protein)} g` : 'pro Tag'}</span></div><div class="kpi"><small>Tage erfasst</small><b class="num">${logged.length} / ${n}</b><span>im Zeitraum</span></div><div class="kpi"><small>${bal <= 0 ? 'Defizit gesamt' : 'Überschuss gesamt'}</small><b class="num ${c ? (good ? 'pos' : 'neg') : ''}">${c ? sgn(bal) : '–'}</b><span>${c ? `≈ ${sgn(bal/7700, 2)} kg Körperfett` : 'Profil nötig'}</span></div></div>`;
+  h += `<section class="panel"><h2>Kalorien pro Tag</h2>${barChart(keys, vals, c)}<div class="legend"><span><i style="background:var(--good)"></i>im Ziel (±10 %)</span><span><i style="background:var(--protein)"></i>darunter</span><span><i style="background:var(--bad)"></i>darüber</span><span><i style="background:var(--gold);height:2px"></i>Tagesziel</span></div></section>`;
+  const wl = (S.profile?.weightLog || []).slice().sort((a, b) => a.date < b.date ? -1 : 1);
+  if (wl.length >= 2) h += `<section class="panel"><h2>Gewicht</h2>${weightChart(wl)}<p class="foot">${fmt(wl[0].kg, 1)} kg am ${fromKey(wl[0].date).toLocaleDateString('de-AT')} → ${fmt(wl.at(-1).kg, 1)} kg (${sgn(wl.at(-1).kg - wl[0].kg, 1)} kg)</p></section>`;
+  const all = Object.keys(S.days).filter(k => S.days[k]?.entries?.length).sort().reverse();
+  h += `<section class="panel"><h2>Alle Tage</h2><hr class="rule">${all.length ? `<div class="daylist">${all.map(k => { const s = sumEntries(S.days[k].entries); let pill = '<span></span>'; if (c) { const d = s.kcal - c.target, p = d / c.target; pill = `<span class="pill ${Math.abs(p) <= 0.1 ? 'ok' : d > 0 ? 'over' : 'under'}">${sgn(d)}</span>`; } return `<button class="dayrow" data-action="goto-day" data-date="${k}"><span><b>${dayLabel(k)}</b><small>${dateLong(k)} · ${S.days[k].entries.length} ${S.days[k].entries.length === 1 ? 'Eintrag' : 'Einträge'}</small></span>${pill}<span class="kc num">${fmt(s.kcal)}</span></button>`; }).join('')}</div>` : '<p class="muted">Sobald du Mahlzeiten erfasst, erscheinen hier alle Tage zum Nachschauen.</p>'}</section>`;
+  return h;
+}
+function barChart(keys, vals, c){
+  const W = 340, H = 160, top = 10, bot = 20, goal = c?.target || 0, mx = Math.max(goal*1.3, ...vals.map(v => v.kcal), 800);
+  const y = v => H - bot - (v/mx)*(H - bot - top), bw = W / keys.length, gap = Math.min(6, bw*0.25);
+  let s = `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Kalorien pro Tag">`;
+  [0.5, 1].forEach(f => { const v = mx*f; s += `<line class="grid" x1="0" x2="${W}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}"/>`; });
+  keys.forEach((k, i) => {
+    const v = vals[i].kcal, x = i*bw + gap/2, w = bw - gap;
+    let cl = 'b-none'; if (v > 0) cl = goal ? (Math.abs(v - goal)/goal <= 0.1 ? 'b-ok' : v > goal ? 'b-over' : 'b-under') : 'b-ok';
+    const hh = v > 0 ? Math.max(2, H - bot - y(v)) : 3;
+    s += `<rect class="${cl}" x="${x.toFixed(1)}" y="${(H - bot - hh).toFixed(1)}" width="${w.toFixed(1)}" height="${hh.toFixed(1)}" rx="1"/>`;
+    const d = fromKey(k), show = keys.length <= 14 || i % 5 === 0 || i === keys.length - 1;
+    if (show) s += `<text x="${(x + w/2).toFixed(1)}" y="${H - 6}" text-anchor="middle">${keys.length <= 7 ? d.toLocaleDateString('de-AT',{weekday:'short'}).slice(0,2) : d.getDate()}</text>`;
+  });
+  if (goal) s += `<line class="goal" x1="0" x2="${W}" y1="${y(goal).toFixed(1)}" y2="${y(goal).toFixed(1)}"/><text class="goal-t" x="${W-2}" y="${(y(goal) - 4).toFixed(1)}" text-anchor="end">${fmt(goal)}</text>`;
+  return s + '</svg>';
+}
+function weightChart(wl){
+  const W = 340, H = 130, p = 16, xs = wl.map(w => fromKey(w.date).getTime()), ys = wl.map(w => w.kg);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys) - 0.5, y1 = Math.max(...ys) + 0.5;
+  const X = t => p + (x1 === x0 ? 0.5 : (t - x0)/(x1 - x0))*(W - 2*p), Y = v => H - p - (v - y0)/(y1 - y0)*(H - 2*p);
+  const pts = wl.map((w, i) => `${X(xs[i]).toFixed(1)},${Y(w.kg).toFixed(1)}`).join(' ');
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Gewichtsverlauf"><line class="grid" x1="0" x2="${W}" y1="${Y(y1-0.5).toFixed(1)}" y2="${Y(y1-0.5).toFixed(1)}"/><line class="grid" x1="0" x2="${W}" y1="${Y(y0+0.5).toFixed(1)}" y2="${Y(y0+0.5).toFixed(1)}"/><text x="2" y="${(Y(y1-0.5)-3).toFixed(1)}">${fmt(y1-0.5,1)}</text><text x="2" y="${(Y(y0+0.5)-3).toFixed(1)}">${fmt(y0+0.5,1)}</text><polyline class="wline" points="${pts}"/>${wl.map((w, i) => `<circle class="wdot" cx="${X(xs[i]).toFixed(1)}" cy="${Y(w.kg).toFixed(1)}" r="${i === wl.length-1 ? 4 : 2.5}"/>`).join('')}</svg>`;
+}
+
+function profileHTML(){
+  const p = S.profile || {sex:'', age:'', height:'', weight:'', activity:'light', goal:'lose', rate:0.5, targetWeight:''};
+  const radio = (name, val, lab, cur) => `<label><input type="radio" name="${name}" id="${name}-${val}" value="${val}" ${cur === val ? 'checked' : ''}><span>${lab}</span></label>`;
+  const theme = lsGet(K_THEME) || 'system';
+  const acct = S.mode === 'cloud'
+    ? `<div class="acct"><span>Angemeldet als <b>${esc(S.user?.email || S.user?.displayName || '')}</b><br><small class="muted">Daten werden in deinem Firebase-Konto gespeichert und auf allen Geräten synchronisiert.</small></span><button class="btn" data-action="sign-out">Abmelden</button></div>`
+    : `<div class="acct"><span><b>Nur auf diesem Gerät</b><br><small class="muted">${configured ? 'Melde dich an, um deine Daten zu sichern und auf mehreren Geräten zu nutzen. Bisherige Einträge werden übernommen.' : 'Firebase ist noch nicht verbunden – siehe README im Repository.'}</small></span>${configured ? '<button class="btn" data-action="go-login">Anmelden</button>' : ''}</div>`;
+  return `<h2 class="sec-title">Dein Profil</h2>
+  <section class="panel" id="pform"><div style="display:flex;flex-direction:column;gap:14px">
+    <div class="field"><span class="flabel">Körper (für die Formel)</span><div class="seg">${radio('p-sex','f','Weiblich',p.sex)}${radio('p-sex','m','Männlich',p.sex)}</div></div>
+    <div class="grid3"><div class="field"><label for="p-age">Alter</label><input type="number" id="p-age" inputmode="numeric" min="14" max="100" placeholder="Jahre" value="${esc(p.age)}"></div><div class="field"><label for="p-height">Größe cm</label><input type="number" id="p-height" inputmode="decimal" min="120" max="230" placeholder="178" value="${esc(p.height)}"></div><div class="field"><label for="p-weight">Gewicht kg</label><input type="number" id="p-weight" inputmode="decimal" step="0.1" min="30" max="300" placeholder="80" value="${esc(p.weight)}"></div></div>
+    <div class="field"><label for="p-activity">Aktivität im Alltag</label><select id="p-activity">${Object.entries(ACT).map(([k, a]) => `<option value="${k}" ${p.activity === k ? 'selected' : ''}>${a.l}</option>`).join('')}</select></div>
+    <div class="field"><span class="flabel">Ziel</span><div class="seg">${radio('p-goal','lose','Abnehmen',p.goal)}${radio('p-goal','keep','Halten',p.goal)}${radio('p-goal','gain','Zunehmen',p.goal)}</div></div>
+    <div class="grid2" id="p-rate-wrap"><div class="field"><label for="p-rate">Tempo</label><select id="p-rate"></select></div><div class="field"><label for="p-target">Zielgewicht kg</label><input type="number" id="p-target" inputmode="decimal" step="0.1" placeholder="optional" value="${esc(p.targetWeight)}"></div></div>
+    <button class="primary" data-action="save-profile">Profil speichern</button>
+  </div></section>
+  <section class="panel"><h2>Deine Werte</h2><hr class="rule"><div class="results" id="p-results"></div></section>
+  <section class="panel"><h2>Gewicht eintragen</h2><p class="muted" style="margin:4px 0 10px">Am besten morgens nüchtern. Dein Bedarf wird mit dem neuen Gewicht neu berechnet.</p><div class="weightlog"><div class="field"><label for="w-new">Heute, kg</label><input type="number" id="w-new" inputmode="decimal" step="0.1" placeholder="${esc(p.weight || '80,0')}"></div><button class="btn" data-action="log-weight">Eintragen</button></div></section>
+  <section class="panel"><h2>Konto &amp; Darstellung</h2><hr class="rule">${acct}<hr class="hair"><div class="field"><span class="flabel">Erscheinungsbild</span><div class="seg" id="theme-seg">${radio('p-theme','system','System',theme)}${radio('p-theme','light','Marmor',theme)}${radio('p-theme','dark','Schwarzfigurig',theme)}</div></div></section>
+  <div class="meander gold" aria-hidden="true"></div>
+  <p class="disclaimer">Alle Nährwerte aus Fotos sind Schätzungen. Bedarf nach Mifflin-St-Jeor-Formel, Referenzwerte nach D-A-CH. Kein Ersatz für ärztliche oder diätologische Beratung.</p>`;
+}
+function readProfileForm(){
+  const v = id => $('#' + id)?.value, r = n => document.querySelector(`input[name="${n}"]:checked`)?.value || '';
+  return {...(S.profile || {}), sex:r('p-sex'), age:num(v('p-age')) || '', height:num(v('p-height')) || '', weight:num(v('p-weight')) || '',
+    activity:v('p-activity') || 'light', goal:r('p-goal') || 'keep', rate:num(v('p-rate')) || num(S.profile?.rate) || 0.5, targetWeight:num(v('p-target')) || ''};
+}
+function rateOptions(goal, cur){ const o = goal === 'gain' ? [0.25, 0.5] : [0.25, 0.5, 0.75, 1]; if (!o.includes(cur)) cur = 0.5; return o.map(x => `<option value="${x}" ${x === cur ? 'selected' : ''}>${x.toLocaleString('de-AT')} kg pro Woche (${goal === 'gain' ? '+' : '−'}${fmt(x*1100)} kcal/Tag)</option>`).join(''); }
+function updateProfileResults(){
+  const p = readProfileForm(), wrap = $('#p-rate-wrap'), sel = $('#p-rate');
+  if (wrap) { wrap.hidden = p.goal === 'keep'; if (sel.dataset.goal !== p.goal) { sel.innerHTML = rateOptions(p.goal, p.rate); sel.dataset.goal = p.goal; } }
+  const c = calc({...p, rate:num(sel?.value) || p.rate}), el = $('#p-results'); if (!el) return;
+  if (!c) { el.innerHTML = '<p class="muted" style="margin:0">Fülle Körper, Alter, Größe und Gewicht aus – dann siehst du hier BMI, Grundumsatz, Tagesbedarf und dein Kalorienziel.</p>'; return; }
+  const pos = Math.max(0, Math.min(100, (c.bmi - 15)/25*100));
+  el.innerHTML = `<div><span class="flabel">Body-Mass-Index</span><div class="bmi-big"><b class="num">${fmt(c.bmi, 1)}</b><span>${bmiCat(c.bmi)}</span></div><div class="bmi-scale"><i style="left:${pos}%"></i><span style="left:14%">18,5</span><span style="left:40%">25</span><span style="left:60%">30</span></div><span class="muted" style="font-size:14px">Gesunder Bereich für ${fmt(p.height)} cm: ${fmt(c.healthy[0], 1)}–${fmt(c.healthy[1], 1)} kg</span></div>
+  <div class="label-table">
+   <div class="lt-row"><span>Grundumsatz (in Ruhe)</span><span class="v"><b>${fmt(c.bmr)}</b> kcal</span><span></span></div>
+   <div class="lt-row"><span>Gesamtbedarf mit Aktivität</span><span class="v"><b>${fmt(c.tdee)}</b> kcal</span><span></span></div>
+   <div class="lt-row"><span>${p.goal === 'lose' ? 'Defizit' : p.goal === 'gain' ? 'Überschuss' : 'Anpassung'}</span><span class="v"><b>${sgn(c.delta)}</b> kcal</span><span></span></div>
+   <div class="lt-row" style="border-bottom:3px double var(--ink)"><b>Dein Tagesziel</b><span class="v"><b style="font-size:16px">${fmt(c.target)}</b> kcal</span><span></span></div>
+   <div class="lt-row"><span style="color:var(--protein);font-weight:700">Protein</span><span class="v"><b>${fmt(c.protein)}</b> g</span><span class="p">${fmt(c.protein*4/c.target*100)}%</span></div>
+   <div class="lt-row"><span style="color:var(--carbs);font-weight:700">Kohlenhydrate</span><span class="v"><b>${fmt(c.carbs)}</b> g</span><span class="p">${fmt(c.carbs*4/c.target*100)}%</span></div>
+   <div class="lt-row"><span style="color:var(--fat);font-weight:700">Fett</span><span class="v"><b>${fmt(c.fat)}</b> g</span><span class="p">30%</span></div>
+  </div>
+  ${c.eta ? `<p style="margin:0">Bei diesem Tempo erreichst du <b>${fmt(p.targetWeight, 1)} kg</b> in etwa <b>${fmt(c.eta.weeks)} Wochen</b> – rund um den ${c.eta.date.toLocaleDateString('de-AT',{day:'numeric',month:'long',year:'numeric'})}.</p>` : ''}
+  ${c.warn ? `<div class="warnbox">${esc(c.warn)}</div>` : ''}`;
+}
+
+/* ───────── Bottom-Sheets ───────── */
+function openSheet(html){ $('#sheet-root').innerHTML = `<div class="scrim" id="scrim"><div class="sheet" role="dialog" aria-modal="true"><div class="grab"></div><div id="sheet-body">${html}</div></div></div>`; document.body.style.overflow = 'hidden'; }
+function setSheet(html){ const b = $('#sheet-body'); if (b) b.innerHTML = html; else openSheet(html); }
+function closeSheet(){ aiCtl?.abort(); $('#sheet-root').innerHTML = ''; document.body.style.overflow = ''; S.draft = null; S.draftImg = null; }
+const head = t => `<div class="sheet-head"><h2>${t}</h2><button class="icon-btn" data-action="close-sheet" aria-label="Schließen">×</button></div>`;
+const mealSeg = cur => `<div class="seg" role="radiogroup" aria-label="Mahlzeit">${MEALS.map(m => `<label><input type="radio" name="add-meal" value="${m.k}" ${m.k === cur ? 'checked' : ''}><span>${m.s}</span></label>`).join('')}</div>`;
+const readMeal = () => document.querySelector('input[name="add-meal"]:checked')?.value || S.pendingMeal;
+function addMenuHTML(){
+  const off = S.ai !== 'on';
+  return `${head('Essen erfassen')}
+  <p class="muted" style="margin:-6px 0 0">${S.date === todayKey() ? 'Für heute' : 'Für ' + dayLabel(S.date) + ', ' + dateLong(S.date)}</p>
+  ${mealSeg(S.pendingMeal)}
+  <div class="add-grid">
+    <label class="add-opt big" ${off ? 'aria-disabled="true"' : ''}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg><span><b>Foto aufnehmen</b><br><small>Kamera öffnen und Teller fotografieren</small></span><input type="file" id="f-cam" accept="image/*" capture="environment" hidden></label>
+    <label class="add-opt" ${off ? 'aria-disabled="true"' : ''}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m3 16 5-5 4 4 3-3 6 6"/><circle cx="16" cy="9" r="1.5"/></svg><b>Aus Galerie</b><small>Vorhandenes Foto wählen</small><input type="file" id="f-gal" accept="image/*" hidden></label>
+    <button class="add-opt" data-action="add-text" ${off ? 'aria-disabled="true"' : ''}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 6h16M4 11h16M4 16h10"/></svg><b>Beschreiben</b><small>„2 Spiegeleier und ein Vollkornbrot“</small></button>
+    <button class="add-opt" data-action="add-manual"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 20h4L19 9l-4-4L4 16z"/></svg><b>Manuell</b><small>Werte selbst eintippen, z. B. von der Packung</small></button>
+  </div>
+  ${off ? `<p class="ai-note">${esc(aiError({code:'off'}))}</p>` : ''}`;
+}
+const busyHTML = msg => `<div class="busy"><div class="spin"></div><div class="grow"><b>${msg}</b><br><small class="muted">Das dauert meist 5–20 Sekunden.</small></div><button class="btn" data-action="stop">Stopp</button></div>`;
+const lock = on => document.querySelectorAll('#sheet-body .sheet-actions button, #sheet-body .fix button, #sheet-body .add-item button').forEach(b => b.disabled = on);
+
+async function onPhoto(file){
+  if (!file) return; S.pendingMeal = readMeal();
+  let img; try { img = await prepImage(file); } catch(e) { toast('Dieses Bild kann nicht geöffnet werden. Versuch ein JPG oder PNG.'); return; }
+  S.draftImg = img;
+  setSheet(`${head('Foto prüfen')}<img class="preview" src="data:${img.mime};base64,${img.b64}" alt="Dein Foto"><div class="field"><label for="ph-hint">Hinweis (optional)</label><input id="ph-hint" placeholder="z. B. in Olivenöl gebraten, halbe Portion gegessen"></div><div id="ph-busy"></div><div class="sheet-actions"><button class="btn" data-action="open-add">Anderes Foto</button><button class="primary" data-action="analyze-photo">Analysieren</button></div>`);
+}
+async function runAnalysis(kind){
+  const hint = (kind === 'photo' ? $('#ph-hint') : $('#tx-text'))?.value.trim() || '';
+  if (kind === 'text' && !hint) { toast('Beschreib kurz, was du gegessen hast.'); return; }
+  const busyEl = kind === 'photo' ? $('#ph-busy') : $('#tx-busy');
+  busyEl.innerHTML = busyHTML(kind === 'photo' ? 'Das Orakel betrachtet deinen Teller…' : 'Berechne Nährwerte…'); lock(true);
+  const prompt = kind === 'photo'
+    ? `${EXPERT} Auf dem Bild ist eine Mahlzeit. Erkenne jede einzelne Komponente (auch Saucen, Öl oder Butter, Beilagen, Getränke) und schätze die Portion in Gramm anhand von Tellergröße, Besteck und typischen Portionen.${hint ? ` Hinweis vom Nutzer: "${hint}".` : ''} Wenn auf dem Bild kein Essen zu sehen ist, antworte nur {"error":"kurze Erklärung auf Deutsch"}. Sonst antworte NUR mit JSON in genau dieser Form: ${SCHEMA}\n${UNITS}`
+    : `${EXPERT} Der Nutzer beschreibt seine Mahlzeit so: "${hint}". Zerlege sie in Komponenten, nimm bei fehlenden Mengen übliche Portionsgrößen an. Antworte NUR mit JSON in genau dieser Form: ${SCHEMA}\n${UNITS}`;
+  try {
+    const res = await ask(prompt, kind === 'photo' ? S.draftImg : null);
+    if (res?.error) { busyEl.innerHTML = `<p class="ai-note">${esc(res.error)}</p>`; lock(false); return; }
+    const items = normItems(res?.items); if (!items.length) throw {code:'invalid_json'};
+    S.draft = {id:uid8(), isNew:true, date:S.date, meal:S.pendingMeal, title:String(res.title || items.map(i => i.name).join(', ')).slice(0,80), items,
+      thumb:kind === 'photo' ? S.draftImg?.thumb : null, source:kind, confidence:String(res.confidence || ''), note:String(res.note || '')};
+    if (kind !== 'photo') S.draftImg = null;
+    setSheet(editorHTML());
+  } catch(e) { const m = aiError(e); busyEl.innerHTML = m ? `<p class="ai-note">${esc(m)}</p>` : ''; lock(false); }
+}
+const totalHTML = t => `<div class="big"><span class="flabel">Gesamt</span><b class="num">${fmt(t.kcal)} <small style="font-size:14px;font-family:var(--f-body)">kcal</small></b></div><div class="mrow"><span style="color:var(--protein)">Protein <b>${fmt(t.protein, 1)} g</b></span><span style="color:var(--carbs)">KH <b>${fmt(t.carbs, 1)} g</b></span><span style="color:var(--fat)">Fett <b>${fmt(t.fat, 1)} g</b></span><span class="muted">Ballaststoffe ${fmt(t.fiber, 1)} g</span></div>`;
+function itemHTML(it, i){
+  const inp = (k, lab) => `<label>${lab}<input type="number" step="any" inputmode="decimal" id="it-${i}-${k}" data-i="${i}" data-f="${k}" value="${r1(num(it[k]))}"></label>`;
+  return `<div class="item"><div class="item-head"><input id="it-${i}-name" data-i="${i}" data-f="name" value="${esc(it.name)}" aria-label="Name der Komponente"><button class="icon-btn" data-action="rm-item" data-i="${i}" aria-label="Komponente entfernen">×</button></div>
+  <div class="item-m">${inp('grams','Menge g')}${inp('kcal','kcal')}${inp('protein','P g')}${inp('carbs','KH g')}${inp('fat','F g')}</div>
+  <details><summary>Weitere Nährwerte</summary><div class="micro-grid">${NUTS.filter(n => !n.main).map(n => inp(n.k, `${n.l.replace('Gesättigte Fettsäuren','Ges. FS')} ${n.u}`)).join('')}</div></details></div>`;
+}
+function editorHTML(){
+  const d = S.draft, t = sumItems(d.items), ai = S.ai === 'on';
+  return `${head(d.isNew ? 'Eintrag prüfen' : 'Eintrag bearbeiten')}
+  ${d.confidence || d.note ? `<p class="ai-note">${d.confidence ? `<span class="conf conf-${esc(d.confidence)}">Sicherheit ${esc(d.confidence)}.</span>` : ''}${esc(d.note)}</p>` : ''}
+  <div class="ed-top">${d.thumb ? `<img class="ed-thumb" src="${d.thumb}" alt="">` : ''}<div class="field grow"><label for="ed-title">Name</label><input id="ed-title" value="${esc(d.title)}" placeholder="z. B. Griechischer Salat"></div></div>
+  <div class="grid2"><div class="field"><label for="ed-meal">Mahlzeit</label><select id="ed-meal">${MEALS.map(m => `<option value="${m.k}" ${m.k === d.meal ? 'selected' : ''}>${m.l}</option>`).join('')}</select></div><div class="field"><label for="ed-date">Tag</label><input type="date" id="ed-date" value="${d.date}" max="${todayKey()}"></div></div>
+  <div class="ed-total" id="ed-total">${totalHTML(t)}</div>
+  <p class="sub">Komponenten – Menge ändern rechnet alle Werte mit</p>
+  <div class="items">${d.items.map(itemHTML).join('') || '<p class="muted" style="margin:0">Noch keine Komponenten. Füge unten eine hinzu.</p>'}</div>
+  <div class="add-item">${ai ? `<input id="ed-new" placeholder="Zutat dazu, z. B. 1 EL Olivenöl" aria-label="Zutat hinzufügen"><button class="btn" data-action="est-item">Schätzen</button>` : ''}<button class="btn" data-action="add-blank" ${ai ? '' : 'style="flex:1"'}>+ Leere Zeile</button></div>
+  ${ai ? `<div class="fix"><label for="ed-fix">Etwas falsch erkannt?</label><textarea id="ed-fix" rows="2" placeholder="z. B. Das ist Hühnchen, nicht Tofu – ca. 150 g, und ohne Sauce"></textarea><button class="btn" data-action="ai-fix">Mit KI korrigieren</button></div>` : ''}
+  <div id="ed-busy"></div>
+  <div class="sheet-actions">${!d.isNew ? `<button class="danger" data-action="del-entry">Löschen</button>${d.date !== todayKey() ? '<button class="btn" data-action="copy-today">Heute nochmal</button>' : ''}` : ''}<button class="primary" data-action="save-entry">Speichern</button></div>`;
+}
+function refreshTotal(){ const el = $('#ed-total'); if (el && S.draft) el.innerHTML = totalHTML(sumItems(S.draft.items)); }
+function syncDraftMeta(){ if (!S.draft) return; const t = $('#ed-title'), m = $('#ed-meal'), d = $('#ed-date'); if (t) S.draft.title = t.value; if (m) S.draft.meal = m.value; if (d && d.value) S.draft.date = d.value > todayKey() ? todayKey() : d.value; }
+async function editorAI(prompt, img, apply, msg){
+  syncDraftMeta(); const b = $('#ed-busy'); b.innerHTML = busyHTML(msg); lock(true);
+  try { const res = await ask(prompt, img); apply(res); setSheet(editorHTML()); toast('Aktualisiert'); }
+  catch(e) { const m = aiError(e); b.innerHTML = m ? `<p class="ai-note">${esc(m)}</p>` : ''; lock(false); }
+}
+
+/* ───────── Aktionen ───────── */
+const H = {
+  tab: a => { S.view = a.dataset.view; render(); window.scrollTo(0, 0); },
+  'prev-day': () => { S.date = addDays(S.date, -1); render(); },
+  'next-day': () => { if (S.date < todayKey()) { S.date = addDays(S.date, 1); render(); } },
+  'goto-day': a => { S.date = a.dataset.date; S.view = 'today'; render(); window.scrollTo(0, 0); },
+  range: a => { S.range = +a.dataset.n; render(); },
+  'open-add': () => { aiCtl?.abort(); S.draftImg = null; const html = addMenuHTML(); $('#sheet-body') ? setSheet(html) : openSheet(html); },
+  'close-sheet': closeSheet,
+  stop: () => aiCtl?.abort(),
+  'add-text': () => { S.pendingMeal = readMeal(); setSheet(`${head('Mahlzeit beschreiben')}<div class="field"><label for="tx-text">Was hast du gegessen?</label><textarea id="tx-text" rows="4" placeholder="z. B. Gyros mit Tzatziki und Pommes, dazu ein Cola Zero 0,5 l"></textarea></div><div id="tx-busy"></div><div class="sheet-actions"><button class="btn" data-action="open-add">Zurück</button><button class="primary" data-action="run-text">Nährwerte schätzen</button></div>`); setTimeout(() => $('#tx-text')?.focus(), 50); },
+  'run-text': () => runAnalysis('text'),
+  'analyze-photo': () => runAnalysis('photo'),
+  'add-manual': () => { S.pendingMeal = readMeal(); const it = {name:''}; NUTS.forEach(n => it[n.k] = 0); it.grams = 100; S.draft = {id:uid8(), isNew:true, date:S.date, meal:S.pendingMeal, title:'', items:[it], thumb:null, source:'manual'}; S.draftImg = null; setSheet(editorHTML()); setTimeout(() => $('#ed-title')?.focus(), 50); },
+  edit: a => { const e = (S.days[S.date]?.entries || []).find(x => x.id === a.dataset.id); if (!e) return; S.draft = {...clone(e), isNew:false, date:S.date, origDate:S.date}; S.draftImg = null; openSheet(editorHTML()); },
+  'rm-item': a => { syncDraftMeta(); S.draft.items.splice(+a.dataset.i, 1); setSheet(editorHTML()); },
+  'add-blank': () => { syncDraftMeta(); const it = {name:'Neue Zutat'}; NUTS.forEach(n => it[n.k] = 0); it.grams = 0; S.draft.items.push(it); setSheet(editorHTML()); },
+  'est-item': () => {
+    const q = $('#ed-new')?.value.trim(); if (!q) { toast('Gib eine Zutat ein, z. B. „1 Banane“.'); return; }
+    editorAI(`${EXPERT} Schätze die Nährwerte für: "${q}". Nimm bei fehlender Menge eine übliche Portion an. Antworte NUR mit JSON: {"items":[ein oder mehrere Objekte wie die items in ${SCHEMA}]}\n${UNITS}`, null,
+      res => { const its = normItems(res?.items); if (!its.length) throw {code:'invalid_json'}; S.draft.items.push(...its); }, 'Schätze Zutat…');
+  },
+  'ai-fix': () => {
+    const q = $('#ed-fix')?.value.trim(); if (!q) { toast('Schreib kurz, was falsch ist.'); return; }
+    syncDraftMeta(); const cur = JSON.stringify({title:S.draft.title, items:S.draft.items});
+    editorAI(`${EXPERT} Hier ist eine bestehende Nährwertschätzung einer Mahlzeit:\n${cur}\nDer Nutzer korrigiert: "${q}". Passe die Komponenten entsprechend an (ersetzen, Menge ändern, hinzufügen oder entfernen) und berechne betroffene Nährwerte neu. Unveränderte Komponenten behalten ihre Werte.${S.draftImg ? ' Das Foto der Mahlzeit ist beigefügt.' : ''} Antworte NUR mit JSON in genau dieser Form: ${SCHEMA}\n${UNITS}`, S.draftImg,
+      res => { const its = normItems(res?.items); if (!its.length) throw {code:'invalid_json'}; S.draft.items = its; if (res.title) S.draft.title = String(res.title).slice(0,80); if (res.note) S.draft.note = String(res.note); if (res.confidence) S.draft.confidence = String(res.confidence); }, 'Korrigiere…');
+  },
+  'save-entry': () => {
+    syncDraftMeta(); const d = S.draft;
+    d.items = d.items.filter(it => String(it.name).trim() || num(it.kcal) > 0);
+    if (!d.items.length) { toast('Füge mindestens eine Komponente mit Kalorien hinzu.'); return; }
+    d.items.forEach(it => { if (!String(it.name).trim()) it.name = 'Zutat'; NUTS.forEach(n => it[n.k] = r1(num(it[n.k]))); it.grams = r1(num(it.grams)); });
+    if (!String(d.title).trim()) d.title = d.items.map(i => i.name).join(', ').slice(0, 80);
+    const entry = {id:d.id, meal:d.meal, title:String(d.title).trim(), items:d.items, thumb:d.thumb || null, source:d.source || 'manual', confidence:d.confidence || '', note:d.note || '', created:d.created || Date.now()};
+    const touched = new Set([d.date]);
+    if (d.origDate && d.origDate !== d.date) { const od = S.days[d.origDate]; if (od) { od.entries = od.entries.filter(e => e.id !== d.id); touched.add(d.origDate); } }
+    const day = S.days[d.date] || (S.days[d.date] = {date:d.date, entries:[]});
+    const i = day.entries.findIndex(e => e.id === d.id); if (i >= 0) day.entries[i] = entry; else day.entries.push(entry);
+    S.date = d.date; closeSheet(); touched.forEach(saveDay); render(); toast('Gespeichert');
+  },
+  'del-entry': a => {
+    if (!a.classList.contains('armed')) { a.classList.add('armed'); a.textContent = 'Wirklich löschen?'; return; }
+    const d = S.draft, k = d.origDate || d.date, day = S.days[k]; if (day) day.entries = day.entries.filter(e => e.id !== d.id);
+    closeSheet(); saveDay(k); render(); toast('Gelöscht');
+  },
+  'copy-today': () => {
+    syncDraftMeta(); const t = todayKey(), entry = {...clone(S.draft), id:uid8(), meal:defaultMeal(), created:Date.now()};
+    ['isNew','date','origDate'].forEach(x => delete entry[x]);
+    const day = S.days[t] || (S.days[t] = {date:t, entries:[]}); day.entries.push(entry);
+    S.date = t; closeSheet(); saveDay(t); render(); toast('Zu heute hinzugefügt');
+  },
+  'save-profile': () => {
+    const p = readProfileForm(); if (!p.sex || !p.age || !p.height || !p.weight) { toast('Bitte Körper, Alter, Größe und Gewicht ausfüllen.'); return; }
+    p.rate = num($('#p-rate')?.value) || 0.5; p.weightLog = p.weightLog || []; if (!p.weightLog.length) p.weightLog.push({date:todayKey(), kg:p.weight});
+    S.profile = p; saveProfile(); S.view = 'today'; render(); window.scrollTo(0, 0); toast('Profil gespeichert');
+  },
+  'log-weight': () => {
+    const kg = num($('#w-new')?.value); if (!(kg > 25 && kg < 400)) { toast('Gib ein gültiges Gewicht ein.'); return; }
+    const p = {...readProfileForm()}; p.weight = kg; p.weightLog = (p.weightLog || []).filter(w => w.date !== todayKey()); p.weightLog.push({date:todayKey(), kg}); p.weightLog.sort((a, b) => a.date < b.date ? -1 : 1);
+    S.profile = p; const wi = $('#p-weight'); if (wi) wi.value = kg; $('#w-new').value = ''; updateProfileResults(); saveProfile(); toast('Gewicht eingetragen');
+  },
+  'sign-out': signOutNow,
+  'go-login': () => { lsSet(K_MODE, null); showLogin(); },
+};
+
+/* ───────── Events ───────── */
+let gBase = null; // Ausgangswerte, solange die Menge einer Komponente bearbeitet wird
+document.addEventListener('click', e => {
+  if (e.target.id === 'scrim') { closeSheet(); return; }
+  const a = e.target.closest('[data-action]'); if (!a || a.disabled || a.tagName === 'LABEL') return;
+  const f = H[a.dataset.action]; if (f) { if (a.type !== 'radio') e.preventDefault(); f(a, e); }
+});
+document.addEventListener('change', e => {
+  const t = e.target;
+  if (t.id === 'f-cam' || t.id === 'f-gal') { const f = t.files?.[0]; t.value = ''; onPhoto(f); return; }
+  if (t.id === 'dpick' && t.value) { S.date = t.value > todayKey() ? todayKey() : t.value; render(); return; }
+  if (t.name === 'p-theme') { const v = t.value; if (v === 'system') { delete document.documentElement.dataset.theme; lsSet(K_THEME, null); } else { document.documentElement.dataset.theme = v; lsSet(K_THEME, v); } return; }
+  if (t.closest('#pform')) updateProfileResults();
+});
+document.addEventListener('input', e => {
+  const t = e.target;
+  if (t.closest('#pform')) { updateProfileResults(); return; }
+  if (S.draft && t.dataset.f) {
+    const it = S.draft.items[+t.dataset.i]; if (!it) return; const f = t.dataset.f;
+    if (f === 'name') { it.name = t.value; return; }
+    const v = Math.max(0, num(t.value));
+    if (f === 'grams') {
+      if (!gBase || gBase.it !== it) gBase = {it, grams:num(it.grams), vals:Object.fromEntries(NUTS.map(n => [n.k, num(it[n.k])]))};
+      if (gBase.grams > 0 && v > 0) { const r = v / gBase.grams; NUTS.forEach(n => { it[n.k] = gBase.vals[n.k]*r; const el = document.getElementById(`it-${t.dataset.i}-${n.k}`); if (el) el.value = r1(it[n.k]); }); }
+    } else if (gBase?.it === it) gBase = null;
+    it[f] = v; refreshTotal();
+  }
+});
+document.addEventListener('focusout', e => { if (e.target.dataset?.f === 'grams') gBase = null; });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('#scrim')) closeSheet(); });
+$('#btn-google').addEventListener('click', () => { $('#login-err').hidden = true; signInGoogle(); });
+$('#btn-local').addEventListener('click', () => { lsSet(K_MODE, 'local'); startLocal(); });
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', () => render());
+
+/* ───────── Start ───────── */
+if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
+if (!configured) startLocal();
+else initFirebase().catch(e => { console.error(e); startLocal(); toast('Firebase konnte nicht geladen werden – Offline-Modus.'); });
