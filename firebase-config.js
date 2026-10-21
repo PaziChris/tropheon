@@ -19,7 +19,7 @@ export default {
 
   // App Check (Pflicht für die KI): Schlüssel aus Google Cloud Fraud Defense (reCAPTCHA Enterprise, Typ Web).
   // Anleitung im README, Schritt 6.
-  recaptchaSiteKey: "",
+  recaptchaSiteKey: "6LfoMvotAAAAAIdVr7Ke8H0jyCCYWm1pD460ZKnF",
 
   // Gemini-Modell für die Fotoanalyse (Firebase AI Logic, Gemini Developer API).
   // gemini-3.5-flash ist stabil und im kostenlosen Spark-Tarif nutzbar.
